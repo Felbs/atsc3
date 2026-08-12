@@ -14,6 +14,14 @@ pretending.
 | 5. optional C LDPC kernel | 2 min | ~7× slower LDPC stage |
 | 6. first tune | 1 min | — |
 
+**You do not need a GPU, and you do not need `torch`.** Nothing in that table
+mentions one because the receiver decodes on an ordinary CPU; `torch` only
+enables an OPTIONAL accelerator. On a 6-core desktop the tuned CPU path
+measured **1.02x** real time against **0.896x** for that same box's GTX 1060 —
+the GPU lost. If the chain is running slowly, the cause is far more likely to
+be the antenna, the CPU governor, or the unbuilt LDPC kernel in step 5 than a
+missing GPU. `python tools/atsc3_doctor.py` checks all three.
+
 **Step 3 is no longer a blocker.** The numeric tables ship with the repo, so a
 fresh clone decodes picture and sound immediately. It is kept below for anyone
 who wants to re-derive the tables from the published standards themselves.
