@@ -1326,6 +1326,35 @@ def apply_cpu_isolation(spec):
         return None
 
 
+def _default_accel():
+    """Pick the decode engine instead of assuming a GPU is there.
+
+    This defaulted to "gpu-full", and on a machine with no CUDA that is the
+    WORST of both worlds: there is no GPU to use, AND the gated float32 fast
+    path never engages, because every fast lever is spelled
+
+        fast = (a.accel == "cpu" and not a.exact_cpu)
+
+    So the reader got the slow float64 path on a machine that had no
+    alternative. Measured on a 6-core 2016 desktop, same air, same antenna:
+
+        default gpu-full   0.47x real time   front end 346 ms   notch 226 ms
+        --accel cpu        0.80x real time   front end  12 ms   notch   0 ms
+
+    Nearly 2x, and --decode-procs was silently ignored as well, since that is
+    also gated on accel == "cpu". Someone installing this on an ordinary PC
+    would have measured half the speed the hardware can do and concluded their
+    machine was too slow. Choose by what is actually present.
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "gpu-full"
+    except Exception:                                            # noqa: BLE001
+        pass
+    return "cpu"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="atsc3 watch",
@@ -1426,8 +1455,11 @@ def main(argv=None):
                          "through m44_ldm instead of m9_fast.  `off` forces "
                          "the m9_fast path and skips the sniff entirely.  "
                          "There is no channel number in this decision.")
-    ap.add_argument("--accel", default="gpu-full",
-                    choices=("cpu", "gpu", "gpu-full"))
+    ap.add_argument("--accel", default=None,
+                    choices=("cpu", "gpu", "gpu-full"),
+                    help="decode engine. Default: gpu-full when a usable GPU "
+                         "is present, otherwise cpu. Do not hand-set gpu-full "
+                         "on a machine without CUDA -- see _default_accel().")
     ap.add_argument("--exact-cpu", action="store_true",
                     help="run --accel cpu in the HEAD-exact float64 path "
                          "instead of the gated float32 fast path (E52)")
@@ -1473,6 +1505,8 @@ def main(argv=None):
     if a.rf is None and not a.capture:
         ap.error("--rf is required when tuning a radio "
                  "(not needed with --capture, which replays a file)")
+    if a.accel is None:
+        a.accel = _default_accel()
 
     if a.no_margin:
         # before any worker spawns: the config rides the environment

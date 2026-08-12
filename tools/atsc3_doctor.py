@@ -151,6 +151,38 @@ def check_spec(spec_lab: Path, spec_root: Path) -> None:
 
 
 # ------------------------------------------------------ the optional C kernel
+def check_cpu_governor() -> None:
+    """On Linux, a reboot silently halves the decode.
+
+    The default `schedutil` governor down-clocks between the bursty per-Frame
+    stages, and the front end is latency-bound rather than throughput-bound,
+    so it never gets the clocks it needs. Measured on a 6-core desktop: the
+    same capture lost lock halfway and filled the back half of the file with
+    null packets under `schedutil`, and decoded cleanly throughout under
+    `performance`. It resets on EVERY boot, which is what makes it worth a
+    check rather than a line in a document.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    p = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+    try:
+        gov = p.read_text().strip()
+    except Exception:                                            # noqa: BLE001
+        record(SKIP, "CPU governor", "no cpufreq on this kernel")
+        return
+    if gov == "performance":
+        record(PASS, "CPU governor", "performance")
+    else:
+        record(WARN, "CPU governor", f"{gov!r} -- not 'performance'",
+               "The decode is latency-bound and this governor down-clocks "
+               "between stages, which shows up as sample overruns and lost "
+               "lock rather than as an obvious slowdown. Fix for this boot:\n"
+               "         sudo cpupower frequency-set -g performance\n"
+               "       (or run Software-TV-Tuner's tools/fix_linux_tuning.sh, "
+               "which also handles USB autosuspend and C-states). It resets "
+               "on every reboot.")
+
+
 def check_ldpc_kernel() -> None:
     src = REPO / "lab" / "ldpc_kernel.c"
     out = REPO / "lab" / ("ldpc_kernel.dll" if os.name == "nt"
@@ -609,6 +641,7 @@ def main() -> int:
     print("\n-- inputs the decoder cannot run without " + "-" * 55)
     check_spec(REPO / "lab" / "spec", REPO / "spec")
     check_ldpc_kernel()
+    check_cpu_governor()
 
     print("\n-- the performance traps " + "-" * 71)
     if args.skip_blas:
