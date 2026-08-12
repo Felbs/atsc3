@@ -39,6 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BANK_DIR = os.path.join(HERE, "spec_bank")
 NUC_BANK = os.path.join(BANK_DIR, "nuc_a322.npz")
 SFB_BANK = os.path.join(BANK_DIR, "ac4_sfb_offsets.json")
+HCB_BANK = os.path.join(BANK_DIR, "ac4_huffman.json")
 
 
 def _key(table: str, cr: str) -> str:
@@ -143,6 +144,65 @@ def build_sfb(verify: bool = False) -> int:
     print(f"banked {len(out)} AC-4 band tables -> {SFB_BANK} "
           f"({os.path.getsize(SFB_BANK):,} bytes)")
     print("gate: every layout monotonic and ends at its transform length")
+    return build_hcb(verify=verify)
+
+
+def build_hcb(verify: bool = False) -> int:
+    """Bank the AC-4 Huffman codebooks (ETSI TS 103 190).
+
+    Without these the AC-4 decoder cannot run at all, so a clone got video and
+    no sound. Same rule as the rest: the NUMBERS ship, the document does not.
+    """
+    import json
+    import m23_hcb as H
+
+    if not os.path.exists(H.DEFAULT_C):
+        print(f"note: {os.path.basename(H.DEFAULT_C)} not present -- skipping "
+              f"the AC-4 codebook bank (needs a development box)")
+        return 0
+
+    arrays = H.parse_c(H.DEFAULT_C)
+
+    # Gate: a complete prefix code has Kraft sum exactly 1.0 and no codeword
+    # that prefixes another. A transposed digit breaks both.
+    bad = []
+    for name in sorted(arrays):
+        if not name.endswith("_LEN"):
+            continue
+        cw = arrays.get(name[:-4] + "_CW")
+        if cw is None:
+            continue
+        lengths = arrays[name]
+        k = H.kraft(lengths)
+        if abs(k - 1.0) > 1e-9:
+            bad.append(f"{name}: Kraft sum {k!r} != 1.0")
+            continue
+        ok, where = H.prefix_free(lengths, cw)
+        if not ok:
+            bad.append(f"{name}: not prefix-free at {where}")
+    if bad:
+        print("REFUSING TO BANK -- the codebooks failed their own gate:")
+        for b in bad[:6]:
+            print("   ", b)
+        return 1
+
+    if verify:
+        if not os.path.exists(HCB_BANK):
+            print(f"error: no bank at {HCB_BANK}")
+            return 2
+        have = json.load(open(HCB_BANK, encoding="utf-8"))
+        if have != arrays:
+            print("MISMATCH: banked AC-4 codebooks differ from a fresh parse")
+            return 1
+        print(f"verify: {len(arrays)} banked AC-4 codebook arrays match a fresh parse")
+        return 0
+
+    with open(HCB_BANK, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(arrays, fh, sort_keys=True, separators=(",", ":"))
+        fh.write("\n")
+    print(f"banked {len(arrays)} AC-4 codebook arrays -> {HCB_BANK} "
+          f"({os.path.getsize(HCB_BANK):,} bytes)")
+    print("gate: every codebook Kraft-complete and prefix-free")
     return 0
 
 

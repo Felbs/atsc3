@@ -53,8 +53,27 @@ ARRAY = re.compile(
     re.S)
 
 
+BANK = os.path.join(HERE, "spec_bank", "ac4_huffman.json")
+
+
 def parse_c(path):
-    """-> {name: [ints]} for every const array in the file."""
+    """-> {name: [ints]} for every const array in the file.
+
+    A fresh clone has no ETSI source file -- the document is copyrighted and
+    not ours to redistribute. The codebooks themselves are integers, so they
+    ship as a banked artifact and the AC-4 decoder works out of the box.
+    Without this the receiver decoded video and no sound.
+    """
+    if not os.path.exists(path) and os.path.exists(BANK):
+        import json
+        with open(BANK, encoding="utf-8") as fh:
+            arrays = json.load(fh)
+        # Gated on load, not trusted: a complete prefix code has Kraft sum
+        # 1.0, which a transposed digit breaks.
+        for name, lengths in arrays.items():
+            if name.endswith("_LEN") and abs(kraft(lengths) - 1.0) > 1e-9:
+                raise SystemExit(f"banked codebook {name} failed its Kraft gate")
+        return arrays
     src = open(path, encoding="utf-8", errors="replace").read()
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     out = {}
