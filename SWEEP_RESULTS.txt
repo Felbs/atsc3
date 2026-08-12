@@ -1,0 +1,93 @@
+﻿====================================================================================================
+ATSC 3.0 BOOTSTRAP -- ARCHIVED CAPTURE SWEEP  (no radio; files only)
+structural threshold peak_ratio >= 6.0, matched threshold >= 8.0
+====================================================================================================
+
+[target ] rf27_capture.cs16   RF27 551 MHz  640 MB  cs16 @ 8.000 Msps
+          <archive>/lab\wl_gate2\rf27_capture.cs16
+          scanned 20.0 s in 21 chunks (95.2s)
+          spectrum: occupied BW 6.78 MHz  flatness 0.770  peak +26.4 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+26.4 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 3.29  median 2.41  (normalized corr at peak 0.1281)
+          matched ratio:         3.48
+          VERDICT: NO_BOOTSTRAP
+
+[target ] philips_rf36_strong.cs16   RF36 605 MHz  956 MB  cs16 @ 8.000 Msps
+          <archive>/lab\captures\philips_rf36_strong.cs16
+          scanned 29.9 s in 30 chunks (142.2s)
+          spectrum: occupied BW 6.19 MHz  flatness 0.748  peak +26.5 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+26.5 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 2.37  median 2.15  (normalized corr at peak 0.1349)
+          matched ratio:         3.52
+          VERDICT: NO_BOOTSTRAP
+
+[target ] rf36.cs16   RF36 605 MHz  640 MB  cs16 @ 8.000 Msps
+          data\offline_test\rf36.cs16
+          scanned 20.0 s in 21 chunks (95.6s)
+          spectrum: occupied BW 6.19 MHz  flatness 0.738  peak +26.4 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+26.4 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 2.21  median 2.02  (normalized corr at peak 0.1423)
+          matched ratio:         3.45
+          VERDICT: NO_BOOTSTRAP
+
+[target ] rf27.cf32   RF27 551 MHz  13 MB  cf32 @ 8.000 Msps
+          <archive>/tools\scan_lab\fixtures\rf27.cf32
+          scanned 0.2 s in 1 chunks (1.4s)
+          spectrum: occupied BW 6.94 MHz  flatness 0.815  peak +25.0 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+25.0 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 2.53  median 2.53  (normalized corr at peak 0.1161)
+          matched ratio:         3.28
+          VERDICT: NO_BOOTSTRAP
+
+[target ] rf36.cf32   RF36 605 MHz  13 MB  cf32 @ 8.000 Msps
+          <archive>/tools\scan_lab\fixtures\rf36.cf32
+          scanned 0.2 s in 1 chunks (1.4s)
+          spectrum: occupied BW 6.16 MHz  flatness 0.741  peak +27.2 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+27.2 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 1.78  median 1.78  (normalized corr at peak 0.1403)
+          matched ratio:         3.32
+          VERDICT: NO_BOOTSTRAP
+
+[control] rf34_ctrl.cs16   RF34 593 MHz  480 MB  cs16 @ 8.000 Msps
+          <archive>/lab\marginal_iq\rf34_ctrl.cs16
+          scanned 15.0 s in 16 chunks (72.0s)
+          spectrum: occupied BW 6.42 MHz  flatness 0.700  peak +27.8 dB @ +3.310 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+26.4 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 2.40  median 2.31  (normalized corr at peak 0.1359)
+          matched ratio:         3.37
+          VERDICT: NO_BOOTSTRAP
+
+[control] philips_rf15_cliffclean.cs16   RF15 479 MHz  953 MB  cs16 @ 8.000 Msps
+          <archive>/lab\captures\philips_rf15_cliffclean.cs16
+          scanned 29.8 s in 30 chunks (141.7s)
+          spectrum: occupied BW 5.55 MHz  flatness 0.907  peak +24.9 dB @ -2.690 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+24.9 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 3.09  median 2.58  (normalized corr at peak 0.1205)
+          matched ratio:         3.48
+          VERDICT: NO_BOOTSTRAP
+
+[control] night_rabbit_rf34_mer16.1_2227.cs16   RF34 593 MHz  1440 MB  cs16 @ 8.000 Msps
+          <archive>/lab\captures\night_rabbit_rf34_mer16.1_2227.cs16
+          scanned 45.0 s in 46 chunks (213.3s)
+          spectrum: occupied BW 6.38 MHz  flatness 0.684  peak +29.6 dB @ +3.310 MHz
+          8-VSB pilot @ -2.690 MHz: PRESENT (+28.4 dB over median)   -> ATSC 1.0
+          structural peak_ratio: best 2.24  median 1.95  (normalized corr at peak 0.1678)
+          matched ratio:         3.48
+          VERDICT: NO_BOOTSTRAP
+
+====================================================================================================
+SUMMARY
+role     file                                             struct   matched  verdict
+target   rf27_capture.cs16                                  3.29      3.48  NO_BOOTSTRAP
+target   philips_rf36_strong.cs16                           2.37      3.52  NO_BOOTSTRAP
+target   rf36.cs16                                          2.21      3.45  NO_BOOTSTRAP
+target   rf27.cf32                                          2.53      3.28  NO_BOOTSTRAP
+target   rf36.cf32                                          1.78      3.32  NO_BOOTSTRAP
+control  rf34_ctrl.cs16                                     2.40      3.37  NO_BOOTSTRAP
+control  philips_rf15_cliffclean.cs16                       3.09      3.48  NO_BOOTSTRAP
+control  night_rabbit_rf34_mer16.1_2227.cs16                2.24      3.48  NO_BOOTSTRAP
+
+controls clean (known 8-VSB must be negative): 3/3
+targets positive: 0/5
+====================================================================================================
+wrote sweep_results.json

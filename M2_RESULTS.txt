@@ -1,0 +1,579 @@
+ATSC 3.0 M2 -- signaling decode from real off-air captures
+Generated 2026-08-06T02:15:03Z -- OFFLINE ONLY, no radio opened.
+python = ~\radioconda\python.exe
+
+############ STAGE A: python lab/m2_stage_a.py hit_rf33.cs16 --rate 8e6 --pn-sweep
+=== M2 STAGE A === hit_rf33.cs16 @ 8 Msps
+  chunk t= 0.00s  bootstraps=4
+  chunk t= 1.00s  bootstraps=4
+  chunk t= 2.00s  bootstraps=4
+  chunk t= 3.00s  bootstraps=4
+  chunk t= 4.00s  bootstraps=4
+  chunk t= 5.00s  bootstraps=4
+  chunk t= 6.00s  bootstraps=4
+  chunk t= 7.00s  bootstraps=4
+
+32 bootstrap occurrences in 7.660 s (10.3s wall)
+
+--- per-occurrence ---
+  #    t_sec   mratio  tres   cfo_Hz               shifts  sym1     sym2     sym3
+  0   0.1028    112.2     0    471.8     [0, 68, 96, 244]  00001100  00000010  00011011
+  1   0.3499    110.4     0    472.7     [0, 68, 96, 244]  00001100  00000010  00011011
+  2   0.5970    109.1     0    475.0     [0, 68, 96, 244]  00001100  00000010  00011011
+  3   0.8441    105.1     0    472.7     [0, 68, 96, 244]  00001100  00000010  00011011
+  4   1.0912    114.5     0    471.3     [0, 68, 96, 244]  00001100  00000010  00011011
+  5   1.3383     99.5     0    471.3     [0, 68, 96, 244]  00001100  00000010  00011011
+  6   1.5854    117.7     0    472.4     [0, 68, 96, 244]  00001100  00000010  00011011
+  7   1.8325     95.4     0    472.9     [0, 68, 96, 244]  00001100  00000010  00011011
+  8   2.0797    115.0     0    470.9     [0, 68, 96, 244]  00001100  00000010  00011011
+  9   2.3268    102.1     0    473.0     [0, 68, 96, 244]  00001100  00000010  00011011
+ 10   2.5739    115.9     0    471.9     [0, 68, 96, 244]  00001100  00000010  00011011
+ 11   2.8210    107.0     0    474.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 12   3.0681    113.1     0    473.2     [0, 68, 96, 244]  00001100  00000010  00011011
+ 13   3.3152    111.9     0    473.2     [0, 68, 96, 244]  00001100  00000010  00011011
+ 14   3.5623    109.3     0    473.7     [0, 68, 96, 244]  00001100  00000010  00011011
+ 15   3.8094    113.8     0    470.1     [0, 68, 96, 244]  00001100  00000010  00011011
+ 16   4.0565    105.0     0    472.3     [0, 68, 96, 244]  00001100  00000010  00011011
+ 17   4.3037    116.5     0    474.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 18   4.5508     96.3     0    473.1     [0, 68, 96, 244]  00001100  00000010  00011011
+ 19   4.7979    117.3     0    474.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 20   5.0450     93.9     0    476.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 21   5.2921    117.0     0    473.0     [0, 68, 96, 244]  00001100  00000010  00011011
+ 22   5.5392    100.1     0    472.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 23   5.7863    113.3     0    470.8     [0, 68, 96, 244]  00001100  00000010  00011011
+ 24   6.0334    108.1     0    473.1     [0, 68, 96, 244]  00001100  00000010  00011011
+ 25   6.2805    111.8     0    476.3     [0, 68, 96, 244]  00001100  00000010  00011011
+ 26   6.5277    109.7     0    471.2     [0, 68, 96, 244]  00001100  00000010  00011011
+ 27   6.7748    109.9     0    473.2     [0, 68, 96, 244]  00001100  00000010  00011011
+ 28   7.0219    114.6     0    474.0     [0, 68, 96, 244]  00001100  00000010  00011011
+ 29   7.2690    102.4     0    473.1     [0, 68, 96, 244]  00001100  00000010  00011011
+ 30   7.5161    116.3     0    474.5     [0, 68, 96, 244]  00001100  00000010  00011011
+ 31   7.7632     98.2     0    477.3     [0, 68, 96, 244]  00001100  00000010  00011011
+
+frame period: mean 247.111 ms  sd 0.0001 ms  min 247.111  max 247.111  (n=31)
+
+--- field stability (value: count) ---
+  ea_wake_up_1           {0: 32}   STABLE
+  min_time_to_next       {3: 32}   STABLE
+  system_bandwidth       {0: 32}   STABLE
+  ea_wake_up_2           {0: 32}   STABLE
+  bsr_coefficient        {2: 32}   STABLE
+  preamble_structure     {27: 32}   STABLE
+
+--- raw signaling bitstrings (sym1 sym2 sym3) ---
+  00001100 00000010 00011011   x32
+
+--- decoded meaning (modal occurrence) ---
+  ea_wake_up_1                     0
+  min_time_to_next                 3
+  min_time_to_next_ms              200
+  system_bandwidth                 0
+  system_bandwidth_str             6 MHz
+  ea_wake_up_2                     0
+  bsr_coefficient                  2
+  post_bootstrap_sample_rate_hz    6912000.0
+  preamble_structure               27
+  ea_wake_up                       0
+
+--- ASSUMPTION A1 arbitration: PN wiring vs REAL AIR ---
+  spec            best_mean_peak_ratio   114.54   detected 5   Fig 5.2 as read: out=r0, fb->r15, seed MSB=r15
+  spec_revseed    best_mean_peak_ratio     3.38   detected 0   same taps, seed bit order reversed
+  recip           best_mean_peak_ratio   114.54   detected 5   reciprocal polynomial wiring
+  recip_revseed   best_mean_peak_ratio     3.38   detected 0   reciprocal taps, seed reversed
+
+wrote lab\m2_stage_a_hit_rf33.json
+
+############ STAGE A cross-channel (3 s each)
+--- hit_rf25 ---
+=== M2 STAGE A === hit_rf25.cs16 @ 8 Msps
+
+12 bootstrap occurrences in 2.668 s (3.9s wall)
+
+--- per-occurrence ---
+  #    t_sec   mratio  tres   cfo_Hz               shifts  sym1     sym2     sym3
+
+frame period: mean 242.518 ms  sd 0.0001 ms  min 242.518  max 242.518  (n=11)
+
+--- field stability (value: count) ---
+  ea_wake_up_1           {0: 12}   STABLE
+  min_time_to_next       {3: 12}   STABLE
+  system_bandwidth       {0: 12}   STABLE
+  ea_wake_up_2           {0: 12}   STABLE
+  bsr_coefficient        {2: 12}   STABLE
+  preamble_structure     {10: 12}   STABLE
+
+--- raw signaling bitstrings (sym1 sym2 sym3) ---
+
+--- decoded meaning (modal occurrence) ---
+  ea_wake_up_1                     0
+  min_time_to_next                 3
+  min_time_to_next_ms              200
+  system_bandwidth                 0
+  system_bandwidth_str             6 MHz
+  ea_wake_up_2                     0
+  bsr_coefficient                  2
+  post_bootstrap_sample_rate_hz    6912000.0
+  preamble_structure               10
+  ea_wake_up                       0
+
+wrote lab\m2_stage_a_hit_rf25.json
+--- hit_rf29 ---
+=== M2 STAGE A === hit_rf29.cs16 @ 8 Msps
+
+12 bootstrap occurrences in 2.747 s (3.9s wall)
+
+--- per-occurrence ---
+  #    t_sec   mratio  tres   cfo_Hz               shifts  sym1     sym2     sym3
+
+frame period: mean 249.704 ms  sd 0.0001 ms  min 249.703  max 249.704  (n=11)
+
+--- field stability (value: count) ---
+  ea_wake_up_1           {0: 12}   STABLE
+  min_time_to_next       {3: 12}   STABLE
+  system_bandwidth       {0: 12}   STABLE
+  ea_wake_up_2           {0: 12}   STABLE
+  bsr_coefficient        {2: 12}   STABLE
+  preamble_structure     {27: 12}   STABLE
+
+--- raw signaling bitstrings (sym1 sym2 sym3) ---
+
+--- decoded meaning (modal occurrence) ---
+  ea_wake_up_1                     0
+  min_time_to_next                 3
+  min_time_to_next_ms              200
+  system_bandwidth                 0
+  system_bandwidth_str             6 MHz
+  ea_wake_up_2                     0
+  bsr_coefficient                  2
+  post_bootstrap_sample_rate_hz    6912000.0
+  preamble_structure               27
+  ea_wake_up                       0
+
+wrote lab\m2_stage_a_hit_rf29.json
+--- hit_rf30 ---
+=== M2 STAGE A === hit_rf30.cs16 @ 8 Msps
+
+12 bootstrap occurrences in 2.747 s (3.9s wall)
+
+--- per-occurrence ---
+  #    t_sec   mratio  tres   cfo_Hz               shifts  sym1     sym2     sym3
+
+frame period: mean 249.703 ms  sd 0.0001 ms  min 249.703  max 249.704  (n=11)
+
+--- field stability (value: count) ---
+  ea_wake_up_1           {0: 12}   STABLE
+  min_time_to_next       {3: 12}   STABLE
+  system_bandwidth       {0: 12}   STABLE
+  ea_wake_up_2           {0: 12}   STABLE
+  bsr_coefficient        {2: 12}   STABLE
+  preamble_structure     {25: 12}   STABLE
+
+--- raw signaling bitstrings (sym1 sym2 sym3) ---
+
+--- decoded meaning (modal occurrence) ---
+  ea_wake_up_1                     0
+  min_time_to_next                 3
+  min_time_to_next_ms              200
+  system_bandwidth                 0
+  system_bandwidth_str             6 MHz
+  ea_wake_up_2                     0
+  bsr_coefficient                  2
+  post_bootstrap_sample_rate_hz    6912000.0
+  preamble_structure               25
+  ea_wake_up                       0
+
+wrote lab\m2_stage_a_hit_rf30.json
+
+############ STAGE B: python lab/m2_stage_b.py hit_rf33.cs16 --rate 8e6
+=== M2 STAGE B === hit_rf33.cs16
+anchor bootstrap at 102.770 ms into block, mratio 112.2, CFO 471.8 Hz
+CLAIMED by bootstrap bits: bw=6 MHz, fs_post=6.912 Msps, preamble_structure=27
+block 2073600 samples @ 6.912 Msps; bootstrap = first 13824 (2.000 ms)
+
+--- subframe boundary: head-to-head grid scores (25 ms window) ---
+  t=   2.00 ms   8192/1536= 3.70  16384/1536= 1.21   -> 8192/1536
+  t=   4.50 ms   8192/1536= 3.66  16384/1536= 1.28   -> 8192/1536
+  t=   7.00 ms   8192/1536= 3.62  16384/1536= 1.29   -> 8192/1536
+  t=   9.50 ms   8192/1536= 3.64  16384/1536= 1.23   -> 8192/1536
+  t=  12.00 ms   8192/1536= 3.64  16384/1536= 1.25   -> 8192/1536
+  t=  14.50 ms   8192/1536= 3.61  16384/1536= 1.20   -> 8192/1536
+  t=  17.00 ms   8192/1536= 3.60  16384/1536= 1.16   -> 8192/1536
+  t=  19.50 ms   8192/1536= 3.63  16384/1536= 1.19   -> 8192/1536
+  t=  22.00 ms   8192/1536= 3.66  16384/1536= 1.16   -> 8192/1536
+  t=  24.50 ms   8192/1536= 3.66  16384/1536= 1.18   -> 8192/1536
+  t=  27.00 ms   8192/1536= 3.65  16384/1536= 1.17   -> 8192/1536
+  t=  29.50 ms   8192/1536= 3.50  16384/1536= 1.35   -> 8192/1536
+  t=  32.00 ms   8192/1536= 3.22  16384/1536= 1.64   -> 8192/1536
+  t=  34.50 ms   8192/1536= 2.91  16384/1536= 1.78   -> 8192/1536
+  t=  37.00 ms   8192/1536= 2.77  16384/1536= 1.95   -> 8192/1536
+  t=  39.50 ms   8192/1536= 2.44  16384/1536= 2.22   -> 8192/1536
+  t=  42.00 ms   8192/1536= 2.15  16384/1536= 2.43   -> 16384/1536
+  t=  44.50 ms   8192/1536= 1.80  16384/1536= 2.56   -> 16384/1536
+  t=  47.00 ms   8192/1536= 1.63  16384/1536= 2.70   -> 16384/1536
+  t=  49.50 ms   8192/1536= 1.32  16384/1536= 2.86   -> 16384/1536
+  t=  52.00 ms   8192/1536= 1.04  16384/1536= 3.06   -> 16384/1536
+  t=  54.50 ms   8192/1536= 1.04  16384/1536= 3.02   -> 16384/1536
+  t=  57.00 ms   8192/1536= 1.06  16384/1536= 3.00   -> 16384/1536
+  t=  59.50 ms   8192/1536= 1.06  16384/1536= 2.96   -> 16384/1536
+  t=  62.00 ms   8192/1536= 1.06  16384/1536= 2.96   -> 16384/1536
+  t=  64.50 ms   8192/1536= 1.05  16384/1536= 2.96   -> 16384/1536
+  t=  67.00 ms   8192/1536= 1.04  16384/1536= 3.01   -> 16384/1536
+  t=  69.50 ms   8192/1536= 1.04  16384/1536= 3.03   -> 16384/1536
+  t=  72.00 ms   8192/1536= 1.04  16384/1536= 3.03   -> 16384/1536
+  t=  74.50 ms   8192/1536= 1.05  16384/1536= 3.09   -> 16384/1536
+  t=  77.00 ms   8192/1536= 1.07  16384/1536= 3.12   -> 16384/1536
+  t=  79.50 ms   8192/1536= 1.06  16384/1536= 3.12   -> 16384/1536
+  t=  82.00 ms   8192/1536= 1.07  16384/1536= 3.14   -> 16384/1536
+  t=  84.50 ms   8192/1536= 1.06  16384/1536= 3.15   -> 16384/1536
+  t=  87.00 ms   8192/1536= 1.05  16384/1536= 3.14   -> 16384/1536
+  t=  89.50 ms   8192/1536= 1.05  16384/1536= 3.11   -> 16384/1536
+  t=  92.00 ms   8192/1536= 1.04  16384/1536= 3.14   -> 16384/1536
+  t=  94.50 ms   8192/1536= 1.04  16384/1536= 3.18   -> 16384/1536
+  t=  97.00 ms   8192/1536= 1.04  16384/1536= 3.18   -> 16384/1536
+  t=  99.50 ms   8192/1536= 1.06  16384/1536= 3.17   -> 16384/1536
+  t= 102.00 ms   8192/1536= 1.05  16384/1536= 3.20   -> 16384/1536
+  t= 104.50 ms   8192/1536= 1.04  16384/1536= 3.18   -> 16384/1536
+  t= 107.00 ms   8192/1536= 1.04  16384/1536= 3.19   -> 16384/1536
+  t= 109.50 ms   8192/1536= 1.06  16384/1536= 3.19   -> 16384/1536
+  t= 112.00 ms   8192/1536= 1.04  16384/1536= 3.21   -> 16384/1536
+  t= 114.50 ms   8192/1536= 1.04  16384/1536= 3.17   -> 16384/1536
+  t= 117.00 ms   8192/1536= 1.04  16384/1536= 3.19   -> 16384/1536
+  t= 119.50 ms   8192/1536= 1.05  16384/1536= 3.15   -> 16384/1536
+  t= 122.00 ms   8192/1536= 1.05  16384/1536= 3.11   -> 16384/1536
+  t= 124.50 ms   8192/1536= 1.06  16384/1536= 3.10   -> 16384/1536
+  t= 127.00 ms   8192/1536= 1.04  16384/1536= 3.10   -> 16384/1536
+  t= 129.50 ms   8192/1536= 1.06  16384/1536= 3.12   -> 16384/1536
+  t= 132.00 ms   8192/1536= 1.04  16384/1536= 3.13   -> 16384/1536
+  t= 134.50 ms   8192/1536= 1.07  16384/1536= 3.18   -> 16384/1536
+  t= 137.00 ms   8192/1536= 1.07  16384/1536= 3.19   -> 16384/1536
+  t= 139.50 ms   8192/1536= 1.06  16384/1536= 3.19   -> 16384/1536
+  t= 142.00 ms   8192/1536= 1.05  16384/1536= 3.21   -> 16384/1536
+  t= 144.50 ms   8192/1536= 1.08  16384/1536= 3.27   -> 16384/1536
+  t= 147.00 ms   8192/1536= 1.06  16384/1536= 3.28   -> 16384/1536
+  t= 149.50 ms   8192/1536= 1.07  16384/1536= 3.26   -> 16384/1536
+  t= 152.00 ms   8192/1536= 1.07  16384/1536= 3.25   -> 16384/1536
+  t= 154.50 ms   8192/1536= 1.06  16384/1536= 3.25   -> 16384/1536
+  t= 157.00 ms   8192/1536= 1.05  16384/1536= 3.22   -> 16384/1536
+  t= 159.50 ms   8192/1536= 1.08  16384/1536= 3.22   -> 16384/1536
+  t= 162.00 ms   8192/1536= 1.07  16384/1536= 3.22   -> 16384/1536
+  t= 164.50 ms   8192/1536= 1.05  16384/1536= 3.20   -> 16384/1536
+  t= 167.00 ms   8192/1536= 1.06  16384/1536= 3.13   -> 16384/1536
+  t= 169.50 ms   8192/1536= 1.06  16384/1536= 3.13   -> 16384/1536
+  t= 172.00 ms   8192/1536= 1.07  16384/1536= 3.16   -> 16384/1536
+  t= 174.50 ms   8192/1536= 1.07  16384/1536= 3.18   -> 16384/1536
+  t= 177.00 ms   8192/1536= 1.07  16384/1536= 3.16   -> 16384/1536
+  t= 179.50 ms   8192/1536= 1.06  16384/1536= 3.10   -> 16384/1536
+  t= 182.00 ms   8192/1536= 1.04  16384/1536= 3.06   -> 16384/1536
+  t= 184.50 ms   8192/1536= 1.07  16384/1536= 3.07   -> 16384/1536
+  t= 187.00 ms   8192/1536= 1.06  16384/1536= 3.09   -> 16384/1536
+  t= 189.50 ms   8192/1536= 1.06  16384/1536= 3.10   -> 16384/1536
+  t= 192.00 ms   8192/1536= 1.07  16384/1536= 3.10   -> 16384/1536
+  t= 194.50 ms   8192/1536= 1.08  16384/1536= 3.13   -> 16384/1536
+  t= 197.00 ms   8192/1536= 1.08  16384/1536= 3.14   -> 16384/1536
+  t= 199.50 ms   8192/1536= 1.08  16384/1536= 3.16   -> 16384/1536
+  t= 202.00 ms   8192/1536= 1.07  16384/1536= 3.17   -> 16384/1536
+  t= 204.50 ms   8192/1536= 1.06  16384/1536= 3.21   -> 16384/1536
+  t= 207.00 ms   8192/1536= 1.05  16384/1536= 3.21   -> 16384/1536
+  t= 209.50 ms   8192/1536= 1.04  16384/1536= 3.18   -> 16384/1536
+  t= 212.00 ms   8192/1536= 1.05  16384/1536= 3.15   -> 16384/1536
+  t= 214.50 ms   8192/1536= 1.05  16384/1536= 3.20   -> 16384/1536
+  t= 217.00 ms   8192/1536= 1.05  16384/1536= 3.16   -> 16384/1536
+  t= 219.50 ms   8192/1536= 1.06  16384/1536= 3.17   -> 16384/1536
+  t= 222.00 ms   8192/1536= 1.07  16384/1536= 3.18   -> 16384/1536
+  t= 224.50 ms   8192/1536= 1.07  16384/1536= 2.94   -> 16384/1536
+
+--- symbol census (CP peak per expected symbol slot) ---
+  FFT   8192 GI 1536: 35 contiguous symbols, t = 3.407 .. 52.667 ms  (pitch 9728 samples = 1.4074 ms)
+  FFT  16384 GI 1536: 75 contiguous symbols, t = 52.667 .. 247.111 ms  (pitch 17920 samples = 2.5926 ms)
+
+--- frame map (winning grid per 10 ms slice) ---
+  t=   2.00 ms  ->  FFT   8192 GI  1536 pitch   9728  score  3.68  
+  t=  12.00 ms  ->  FFT   8192 GI  1536 pitch   9728  score  3.66  
+  t=  22.00 ms  ->  FFT   8192 GI  1536 pitch   9728  score  3.67  
+  t=  32.00 ms  ->  FFT   8192 GI  1536 pitch   9728  score  3.60  
+  t=  42.00 ms  ->  FFT   8192 GI  1536 pitch   9728  score  3.85  
+  t=  52.00 ms  ->  FFT  16384 GI   768 pitch  17152  score  2.55  
+  t=  62.00 ms  ->  FFT  16384 GI   768 pitch  17152  score  2.43  
+  t=  72.00 ms  ->  FFT  16384 GI   512 pitch  16896  score  2.36  
+  t=  82.00 ms  ->  FFT  16384 GI   256 pitch  16640  score  2.31  (CTRL)
+  t=  92.00 ms  ->  FFT  16384 GI   512 pitch  16896  score  2.66  
+  t= 102.00 ms  ->  FFT  16384 GI   256 pitch  16640  score  2.50  (CTRL)
+  t= 112.00 ms  ->  FFT  16384 GI   640 pitch  17024  score  2.85  (CTRL)
+  t= 122.00 ms  ->  FFT  16384 GI   384 pitch  16768  score  2.56  
+  t= 132.00 ms  ->  FFT  16384 GI   384 pitch  16768  score  2.37  
+  t= 142.00 ms  ->  FFT  16384 GI   768 pitch  17152  score  2.44  
+  t= 152.00 ms  ->  FFT  16384 GI   256 pitch  16640  score  2.53  (CTRL)
+  t= 162.00 ms  ->  FFT  16384 GI   768 pitch  17152  score  2.59  
+  t= 172.00 ms  ->  FFT  16384 GI   192 pitch  16576  score  2.73  
+  t= 182.00 ms  ->  FFT  16384 GI   192 pitch  16576  score  2.41  
+  t= 192.00 ms  ->  FFT  16384 GI   192 pitch  16576  score  2.66  
+  t= 202.00 ms  ->  FFT  16384 GI   384 pitch  16768  score  2.42  
+  t= 212.00 ms  ->  FFT  16384 GI   192 pitch  16576  score  2.55  
+  t= 222.00 ms  ->  FFT  16384 GI   512 pitch  16896  score  2.59  
+  t= 232.00 ms  ->  FFT  16384 GI   192 pitch  16576  score  2.54  
+
+--- PAYLOAD 60-240 ms (1244160 samples = 180.0 ms) ---
+    FFT     GI   pitch  legal  fold pk/med  nsym
+  16384   1536   17920    yes         3.14    68
+  32768    192   32960    yes         1.19    36
+  16384    256   16640   CTRL         1.19    73
+  24576    192   24768   CTRL         1.19    49
+  32768    256   33024   CTRL         1.18    36
+  16384    640   17024   CTRL         1.12    72
+  32768    384   33152    yes         1.12    36
+  24576    256   24832   CTRL         1.12    49
+  16384    192   16576    yes         1.11    74
+  24576    384   24960   CTRL         1.10    48
+  MEASURED  FFT=16384 (GI6_1536)  pitch=17920 samples
+            symbol duration 2.5926 ms   subcarrier spacing 421.875 Hz
+            margin over runner-up (32768/192): 2.63x
+            occupied 5.8392 MHz over 13841 subcarriers (of 16384)
+  pilot line test on mean |X(k)|^2 (union over symbols): 6:4.7, 12:4.6, 3:4.3, 32:2.3, 8:2.1, 64*:2.0, 128*:2.0, 13*:2.0
+  pilot line test per-symbol (expect D_x*D_y; * = ILLEGAL control period): 8:4.0, 16:3.3, 6:2.3, 3:2.2, 12:2.2, 4:1.3, 128*:1.3, 32:1.3
+  (D_x,D_y) boost test [* = ILLEGAL control]: (9,5)*:1.048, (9,4)*:1.045, (9,1)*:1.040, (9,3)*:1.039, (9,2)*:1.038, (3,1):1.037, (3,4):1.030, (3,5)*:1.030
+    best legal (3,1) 1.037  vs  best control (9,5) 1.048  -> NOT SEPARATED (inconclusive)
+
+--- PREAMBLE+ first 20 ms after bootstrap (138240 samples = 20.0 ms) ---
+    FFT     GI   pitch  legal  fold pk/med  nsym
+   8192   1536    9728    yes         3.70    13
+   8192   1792    9984   CTRL         1.95    12
+   8192   1280    9472   CTRL         1.94    13
+  24576    192   24768   CTRL         1.50     4
+  16384   3072   19456    yes         1.47     6
+  16384   3328   19712   CTRL         1.45     6
+  16384   3648   20032    yes         1.45     5
+  12288    192   12480   CTRL         1.44    10
+  16384   4096   20480    yes         1.42     5
+  16384   4352   20736   CTRL         1.42     5
+  MEASURED  FFT=8192 (GI6_1536)  pitch=9728 samples
+            symbol duration 1.4074 ms   subcarrier spacing 843.750 Hz
+            margin over runner-up (8192/1792): 1.89x
+            occupied 5.8396 MHz over 6921 subcarriers (of 8192)
+  pilot line test on mean |X(k)|^2 (union over symbols): 6:4.2, 3:4.0, 96*:3.7, 128*:3.0, 4:2.3, 16:2.2, 32:2.2, 17*:2.0
+  pilot line test per-symbol (expect D_x*D_y; * = ILLEGAL control period): 4:2.3, 8:2.2, 6:1.8, 3:1.7, 96*:1.6, 64*:1.3, 128*:1.3, 32:1.2
+  (D_x,D_y) boost test [* = ILLEGAL control]: (17,5)*:1.047, (17,4)*:1.044, (17,3)*:1.044, (17,2)*:1.040, (11,5)*:1.038, (17,1)*:1.036, (16,4):1.024, (4,3)*:1.022
+    best legal (16,4) 1.024  vs  best control (17,5) 1.047  -> NOT SEPARATED (inconclusive)
+
+=== CLAIMED (bootstrap bits, Stage A) vs MEASURED (signal, Stage B) ===
+  post-bootstrap fs   CLAIMED 6.912 Msps
+  payload FFT         MEASURED 16384  GI 1536 (GI6_1536)  Tsym 2.5926 ms  df 421.88 Hz
+  occupied bandwidth  MEASURED 5.8392 MHz / 13841 carriers   CLAIMED channel 6 MHz
+  preamble region     MEASURED FFT 8192 GI 1536 (GI6_1536)   preamble_structure=27
+
+wrote lab\m2_stage_b_hit_rf33.json
+
+############ STAGE B pilots: python lab/m2_pilots.py hit_rf33.cs16 --rate 8e6
+=== M2 pilots === hit_rf33.cs16  fs_post 6.912 Msps  CFO 471.8 Hz  bootstrap 13824 samples
+
+=== SF0 8K symbols 0-5 (preamble?): 6 symbols, active 6921 carriers (nominal 6913), centre bin 4096 ===
+  lag scan (M = repeat coherence):
+    d= 1  p50 0.378  p90 0.676  p99 0.916  #(>0.4)   3150
+    d= 2  p50 0.458  p90 0.795  p99 1.070  #(>0.4)   4054
+    d= 3  p50 0.524  p90 0.967  p99 1.541  #(>0.4)   4581
+  CONTINUAL pilots (min over odd lags > 0.5): 1447 carriers
+    span -3459 .. 3458, median spacing 3
+  (D_x,D_y) test on M_{D_y}  [* = ILLEGAL control]:
+    (32,2) ratio  1.277  residue 16
+    (24,2) ratio  1.247  residue 8
+    (16,2) ratio  1.242  residue 0
+    ( 8,2) ratio  1.232  residue 0
+    (32,1) ratio  1.177  residue 7
+    (24,1) ratio  1.151  residue 23
+    (32,3)* ratio  1.141  residue 10
+    (16,1) ratio  1.115  residue 5
+  best legal SP32_2 1.277 vs best control (32,3) 1.141 -> PATTERN = SP32_2
+
+=== SF0 8K symbols 6+ (data): 30 symbols, active 6921 carriers (nominal 6913), centre bin 4096 ===
+  lag scan (M = repeat coherence):
+    d= 1  p50 0.149  p90 0.285  p99 0.455  #(>0.4)    125
+    d= 2  p50 0.198  p90 0.583  p99 0.750  #(>0.4)   1696
+    d= 3  p50 0.159  p90 0.301  p99 0.476  #(>0.4)    171
+    d= 4  p50 0.207  p90 0.584  p99 0.763  #(>0.4)   1705
+    d= 5  p50 0.161  p90 0.311  p99 0.490  #(>0.4)    198
+    d= 6  p50 0.216  p90 0.582  p99 0.774  #(>0.4)   1708
+    d= 8  p50 0.223  p90 0.587  p99 0.791  #(>0.4)   1746
+    d=12  p50 0.252  p90 0.598  p99 0.829  #(>0.4)   1889
+  CONTINUAL pilots (min over odd lags > 0.5): 53 carriers
+    span -3456 .. 3456, median spacing 141
+  (D_x,D_y) test on M_{D_y}  [* = ILLEGAL control]:
+    ( 4,2) ratio  3.282  residue 0
+    ( 4,4) ratio  3.160  residue 0
+    ( 4,6)* ratio  3.017  residue 0
+    ( 8,2) ratio  2.497  residue 4
+    ( 8,4) ratio  2.433  residue 0
+    ( 8,6)* ratio  2.346  residue 4
+    (12,2) ratio  2.327  residue 8
+    (16,2) ratio  2.276  residue 12
+  best legal SP4_2 3.282 vs best control (4,6) 3.017 -> NOT SEPARATED
+
+=== SF0 8K all: 36 symbols, active 6921 carriers (nominal 6913), centre bin 4096 ===
+  lag scan (M = repeat coherence):
+    d= 1  p50 0.136  p90 0.261  p99 0.437  #(>0.4)     95
+    d= 2  p50 0.181  p90 0.554  p99 0.728  #(>0.4)   1641
+    d= 3  p50 0.143  p90 0.276  p99 0.448  #(>0.4)    112
+    d= 4  p50 0.189  p90 0.560  p99 0.734  #(>0.4)   1630
+    d= 5  p50 0.146  p90 0.282  p99 0.447  #(>0.4)    121
+    d= 6  p50 0.193  p90 0.555  p99 0.725  #(>0.4)   1605
+    d= 8  p50 0.199  p90 0.556  p99 0.733  #(>0.4)   1635
+    d=12  p50 0.218  p90 0.560  p99 0.771  #(>0.4)   1655
+  CONTINUAL pilots (min over odd lags > 0.5): 53 carriers
+    span -3456 .. 3456, median spacing 143
+  (D_x,D_y) test on M_{D_y}  [* = ILLEGAL control]:
+    ( 4,2) ratio  3.445  residue 0
+    ( 4,4) ratio  3.337  residue 0
+    ( 4,6)* ratio  3.238  residue 0
+    ( 8,2) ratio  2.626  residue 0
+    ( 8,4) ratio  2.603  residue 0
+    ( 8,6)* ratio  2.555  residue 0
+    (12,2) ratio  2.396  residue 8
+    (16,2) ratio  2.372  residue 0
+  best legal SP4_2 3.445 vs best control (4,6) 3.238 -> NOT SEPARATED
+
+=== SF1 16K: 64 symbols, active 13840 carriers (nominal 13825), centre bin 8192 ===
+  lag scan (M = repeat coherence):
+    d= 1  p50 0.105  p90 0.191  p99 0.302  #(>0.4)    102
+    d= 2  p50 0.104  p90 0.196  p99 0.316  #(>0.4)    104
+    d= 3  p50 0.107  p90 0.194  p99 0.307  #(>0.4)    102
+    d= 4  p50 0.136  p90 0.379  p99 0.516  #(>0.4)   1028
+    d= 5  p50 0.107  p90 0.196  p99 0.310  #(>0.4)    104
+    d= 6  p50 0.107  p90 0.202  p99 0.324  #(>0.4)    105
+    d= 8  p50 0.142  p90 0.383  p99 0.525  #(>0.4)   1085
+    d=12  p50 0.148  p90 0.384  p99 0.538  #(>0.4)   1097
+  CONTINUAL pilots (min over odd lags > 0.5): 101 carriers
+    all lie on rel-carrier == 0 (mod 2)
+    span -6912 .. 6912, median spacing 133
+  (D_x,D_y) test on M_{D_y}  [* = ILLEGAL control]:
+    ( 4,4) ratio  3.120  residue 0
+    ( 8,4) ratio  2.395  residue 0
+    (12,4) ratio  2.254  residue 0
+    (16,4) ratio  2.214  residue 0
+    (20,4)* ratio  2.176  residue 12
+    (24,4) ratio  2.158  residue 0
+    (32,4) ratio  2.158  residue 0
+    ( 6,4) ratio  1.467  residue 4
+  best legal SP4_4 3.120 vs best control (20,4) 2.176 -> PATTERN = SP4_4
+
+wrote lab\m2_pilots_hit_rf33.json
+
+############ STAGE C: python lab/m2_stage_c.py hit_rf33.cs16 --rate 8e6
+=== M2 STAGE C === hit_rf33.cs16  fs_post 6.912 Msps  CFO 471.8 Hz
+preamble_structure = 27  (what it MEANS needs the A/322 table; the grid below is MEASURED)
+
+8K region: 36 symbols, active carriers 6921, symbol 0 starts at sample 13824 (2.000 ms)
+aligned 36 symbols on 52 continual pilots (common phase + timing slope removed)
+channel estimated on 1731 pilot carriers (lattice origin shift 4, pilot coherence 0.948)
+  |H| dynamic range 38.9 dB
+  recovered reference signs: 892 of 1731 positive (882 sign changes)
+  pilot-referenced channel SNR: 31.3 dB  (scatter of the pilots about the smoothed channel)
+
+--- preamble symbol 0 (L1-Basic bearer) ---
+  MER against each hypothesis: QPSK   4.4 dB  16QAM   9.8 dB  64QAM  13.6 dB  256QAM  15.9 dB
+   |                                         |
+   |                    .     .              |
+   |                .        ...             |
+   |            .                            |
+   |       .                        .        |
+   |               ...........        .      |
+   |            ................       . .   |
+   |    .      .....:--::::::.....     . .   |
+   |  . .     ....:-:.:.....:::....          |
+   |   .     ....:-::.:::.::.::-....     .   |
+   |         ....-:..:.-@-.:.::-...          |
+   |         ....::::.:::::...-:....      .  |
+   |  .       ....-:::.:.::.::-....        . |
+   |    .      .....:-:::::::.....      ..   |
+   |            ................       .     |
+   |    .          ...........          .    |
+   |      .                          .       |
+   |        .                                |
+   |           .    .       ..   .           |
+   |                  .   . ...              |
+   |                      .                  |
+
+--- preamble symbol 1 ---
+  MER against each hypothesis: QPSK   4.3 dB  16QAM   9.8 dB  64QAM  13.9 dB  256QAM  16.4 dB
+   |                                         |
+   |                                         |
+   |                            ...          |
+   |                               ..        |
+   |                                ...      |
+   |               ............      ..      |
+   |            ...::::::::.:::..     ..     |
+   |           .::..-::=:-:-:..::.     .     |
+   |          .:::::---==-==:--.::.          |
+   |          .:.-:---===---=:-:.:.          |
+   |         ..:.----==*@*===-::.::          |
+   |          .::--:====+-=-=-::.:.          |
+   |          .::.:-:==----=-:-:::..         |
+   |     .     ....:--:--::-::.::.           |
+   |     .      ..:.:.::::.:::..             |
+   |     ...       ......:....               |
+   |       ..        .                       |
+   |        .. .                             |
+   |         ....                            |
+   |             .                           |
+   |                                         |
+
+--- subframe-0 data symbol 10 ---
+  MER against each hypothesis: QPSK   4.6 dB  16QAM  10.1 dB  64QAM  14.5 dB  256QAM  17.3 dB
+   |                                         |
+   |                                         |
+   |                               .         |
+   |                               ..        |
+   |                                ..       |
+   |               .:-:.::...:       ..      |
+   |            .:--=:-:----:--.. .   .      |
+   |           .=-:=+-=*+*=*+:-:-.           |
+   |          .*::=+=+++#=#+-*+:-=.          |
+   |          :=.+=@=+%+*#*+**+=.+.          |
+   |         ..--*-*%*+##@++#+-=--..         |
+   |          :=.=**+*#%**#++%-=.+-          |
+   |          .=-:**-+%+**+*=-=:-+.          |
+   |           .--::+*==*+=*==:=-.           |
+   |            ..-::----=-.-:-:.            |
+   |     ...       ...::::.:..               |
+   |       ..                                |
+   |        ...                              |
+   |          .                              |
+   |                                         |
+   |                                         |
+
+--- Stage C equalizer GATE (synthetic OFDM, known QPSK) ---
+  injected channel SNR 30 dB, SP4_2, |H| range 47.0 dB
+  recovered: lattice shift 0, pilot coherence 1.000, pilot SNR 13.5 dB
+  QPSK MER out of the SAME chain used on air: 23.9 dB (PASS)
+
+--- LDPC decoder machinery selftest (SYNTHETIC code, NOT A/322) ---
+  Es/N0  +0.0 dB: bit errors     59/3600, parity-unsatisfied 2/2
+  Es/N0  +2.0 dB: bit errors     24/3600, parity-unsatisfied 1/2
+  Es/N0  +4.0 dB: bit errors      0/3600, parity-unsatisfied 0/2
+  VERDICT: decoder machinery converges to zero errors at high SNR (usable)
+  NOTE: this says NOTHING about A/322.  It is our encoder tested against our decoder.
+
+=== STAGE C OUTCOME (honest) ===
+  REACHED, and GATED:
+    * bootstrap anchor -> measured OFDM grid -> per-symbol cells
+    * continual pilots found blind; per-symbol common phase and
+      timing slope removed on them
+    * scattered-pilot channel estimate with NO A/322 pilot tables
+      (pilot coherence ~0.95, pilot-referenced SNR ~31 dB)
+    * the whole chain passes selftest_equalizer(): synthetic OFDM
+      with known QPSK returns >20 dB MER through the SAME code path
+    * min-sum BP LDPC decoder converges to zero errors (synthetic)
+  NOT REACHED:
+    * the equalized RF33 cells do NOT resolve into a constellation.
+      Best-fit MER rises monotonically with order (QPSK ~4 dB ->
+      256QAM ~17 dB), which is the signature of an UNRESOLVED CLOUD,
+      not of 256QAM.  The first preamble symbol is not QPSK either,
+      so the cell mapping we assume for it is wrong.
+    * therefore no L1-Basic bits, and none are claimed.
+  THE WALL, precisely:
+    (a) A/322 cell-mapping order for the preamble (which cells carry
+        L1-Basic) and the frequency interleaver permutation;
+    (b) the L1-Basic LDPC parity-check address tables (16200 mother
+        code, rate 3/15) and its shortening/puncturing schedule;
+    (c) the L1 scrambler and bit interleaver.
+    The decoder ALGORITHM is no longer the blocker -- (a)-(c) are
+    published TABLES that this repo does not have.  See DESIGN_NOTE.md.
+
+wrote lab\m2_stage_c_hit_rf33.json

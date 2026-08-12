@@ -1,0 +1,41 @@
+atsc3 — an open-source ATSC 3.0 (NextGen TV) receiver
+Copyright 2026 Felbs  <!-- scrub-allow: HOST_USER "Felbs" is the operator's public GitHub handle and chosen copyright holder, not a private login -->
+
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+--------------------------------------------------------------------------------
+PATENTS
+--------------------------------------------------------------------------------
+This software implements broadcast standards, including ATSC 3.0 and, for audio,
+Dolby AC-4. Implementing a published standard may require patent licences held
+by third parties (standards-essential patents). The Apache-2.0 licence grants
+the patent rights of THIS PROJECT'S CONTRIBUTORS ONLY. It does not grant, and
+cannot grant, any third-party standards-essential patent rights. You are
+responsible for determining what patent licences your particular use requires.
+
+--------------------------------------------------------------------------------
+TRADEMARKS
+--------------------------------------------------------------------------------
+"ATSC 3.0", "NextGen TV", "Dolby", "AC-4", and other product and standard names
+are trademarks of their respective owners. They are used in this project only to
+describe compatibility — to say what this software can decode. This project is
+not affiliated with, endorsed by, or sponsored by ATSC, ETSI, Dolby
+Laboratories, or any broadcaster or receiver manufacturer.
+
+--------------------------------------------------------------------------------
+STANDARDS DOCUMENTS
+--------------------------------------------------------------------------------
+The physical-layer and codec numeric tables used by this software are facts
+extracted from published standards. The standards DOCUMENTS themselves are
+copyrighted by their publishers (including ATSC and ETSI) and are NOT
+redistributed by this project. Where a table is shipped, it is the numeric data
+only — never the source document or its text.

@@ -1,0 +1,77 @@
+﻿==========================================================================
+ATSC 3.0 BOOTSTRAP DETECTOR -- SELFTEST (no radio; synthesis only)
+==========================================================================
+
+G1  Gray code vs A/321 Annex B (gold test vector from the spec)
+  [PASS] Table B.1.1/B.1.2 map+demap  16/16 exact
+  [PASS] RCS spacing = 2^(11-N_S) for N_S in 3,4,7,8
+  [PASS] 8-bit mapping is a true Gray code
+
+G2  Frequency-domain structure (A/321 5.2.1 - 5.2.3)
+  [PASS] ZC length 1499, unit modulus
+  [PASS] ZC is CAZAC (zero cyclic autocorr sidelobes)  322 dB
+  [PASS] PN is balanced (m-sequence)  mean=0.5030
+  [PASS] PN period >> bits consumed by one bootstrap (4*749)  period=63457
+  [PASS] 8 minor-version seeds give 8 distinct PN sequences
+  [PASS] DC subcarrier null
+  [PASS] 1498 active subcarriers (+-749, DC null)
+  [PASS] reflective symmetry S(k)==S(-k)
+  [PASS] occupied bandwidth 4.494 MHz <= 4.5 MHz  4.494 MHz
+  [PASS] symbol0 vs symbol1 spectra near-orthogonal  |rho|=0.0387
+
+G3  Time-domain A/B/C vs A/321 5.4 prose (sample ranges + freq shift)
+  [PASS] symbol 0 (CAB) parts A/B/C  A=True C=True B:|.|=True df=True (+1.000000 subcarriers)
+  [PASS] symbol 1 (BCA) parts A/B/C  A=True C=True B:|.|=True df=True (-1.000000 subcarriers)
+  [PASS] symbol 2 (BCA) parts A/B/C  A=True C=True B:|.|=True df=True (-1.000000 subcarriers)
+  [PASS] CAB part B carries the e^{-j*pi} inversion  const=-1.000000+0.000000j
+  [PASS] total length 4*3072
+  [PASS] every symbol has a 520-sample repeat at lag 2048
+  [PASS] PAPR sane for OFDM (< 14 dB)  8.90 dB
+
+G4  Noiseless synth -> detect roundtrip (all fields)
+  [PASS] 3 field permutations recovered exactly
+  [PASS] structural score ~1.0 noiseless  1.0000
+  [PASS] timing exact  pos=2000
+  [PASS] matched peak ratio very high  286.1
+  [PASS] post-bootstrap rate decoded  bsr=2 -> 6.912 MHz (the standard 6 MHz ATSC 3.0 rate)
+  [PASS] wrong minor version -> STRUCTURE_ONLY, not CONFIRMED  verdict=ATSC3_STRUCTURE_ONLY ratio=3.5
+
+G5  SNR sweep  (40 trials/point, CFO=+0 Hz)
+    SNR dB | struct | matched | bits OK | struct score | CFO err Hz | timing err
+       0.0 | 100.0% |  100.0% |  100.0% |       0.8308 |        3.2 |        0.0
+      -3.0 | 100.0% |  100.0% |  100.0% |       0.7129 |        3.9 |        0.0
+      -6.0 | 100.0% |  100.0% |  100.0% |       0.5528 |        8.1 |        0.0
+      -9.0 | 100.0% |  100.0% |  100.0% |       0.3853 |        9.3 |        0.0
+     -12.0 | 100.0% |  100.0% |  100.0% |       0.2383 |       15.8 |        1.5
+     -15.0 |  30.0% |  100.0% |  100.0% |       0.1371 |       43.7 |        4.5
+     -18.0 |   0.0% |   92.5% |   92.5% |       0.0808 |       56.1 |        nan
+
+G5  SNR sweep with CFO  (13 trials/point, CFO=+4200 Hz)
+    SNR dB | struct | matched | bits OK | struct score | CFO err Hz | timing err
+      -6.0 | 100.0% |  100.0% |  100.0% |       0.5541 |        7.9 |        0.0
+     -12.0 | 100.0% |  100.0% |  100.0% |       0.2325 |       14.9 |        1.0
+
+G6  False alarms (100 trials each)
+  [PASS] Gaussian noise: 0 structural detections  0/100, max peak_ratio 4.60 (thr 8.0)
+  [PASS] Gaussian noise: 0 full ATSC3 confirmations  0/100, max matched ratio 3.30 (thr 8.0)
+  [PASS] synthetic 8-VSB: 0 structural detections  0/100, max peak_ratio 3.16 (thr 8.0)
+  [PASS] synthetic 8-VSB: 0 full ATSC3 confirmations  0/100, max matched ratio 3.39 (thr 8.0)
+  [PASS] bootstrap under co-channel 8-VSB (~9 dB SIR): found + bits correct  25/25
+
+G7  Realistic capture chain: 6.144 -> 8.0 Msps -> resample back
+  [PASS] 8 Msps round trip + CFO +-8 kHz @ 3 dB SNR  20/20
+
+DETECTION THRESHOLD SUMMARY
+    SNR  +0.0 dB : structural 100.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR  -3.0 dB : structural 100.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR  -6.0 dB : structural 100.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR  -9.0 dB : structural 100.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR -12.0 dB : structural 100.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR -15.0 dB : structural  30.0%  confirmed 100.0%  all-24-bits 100.0%
+    SNR -18.0 dB : structural   0.0%  confirmed  92.5%  all-24-bits  92.5%
+    -> structural detection >=99% down to -12 dB SNR
+    -> full signaling decode >=99% down to -15 dB SNR
+
+==========================================================================
+GATE: 32/32 checks passed   (26.2s)
+==========================================================================

@@ -1,0 +1,89 @@
+# Captures and artifacts stay out of git (fleet convention: repo-local lab/).
+# NB per the gitignore-hides-data-from-backups law: back these up EXPLICITLY,
+# they will not ride along with the repo.
+lab/*
+!lab/*.py
+!lab/*.md
+# E54: the kernel SOURCE is code and rides with the repo; the built
+# .dll/.so never does (fleet law: never copy the binary, rebuild per box
+# with lab/build_ldpc_kernel.py)
+!lab/ldpc_kernel.c
+# The per-carrier gain table is CALIBRATION CONFIG, not a capture artifact:
+# it is hand-edited, diffed and reviewed, and a value nobody can see in git
+# is a value nobody can check (the gitignore-hides-data law). Keep it in.
+!lab/carrier_gain.json
+
+# E83: the scrub audit REPORT is a dossier -- a tidy index of every identifier
+# in the repo and exactly where it lives, which is more useful to someone
+# looking for the operator than the scattered originals are. Committing it
+# would put that index in the history FOREVER, which is the very finding the
+# report itself makes. Regenerate it instead:
+#     python tools/scrub_audit.py --out release/SCRUB_AUDIT_run.txt
+# The rest of release/ is publishable draft and rides with the repo.
+release/SCRUB_AUDIT.md
+release/SCRUB_AUDIT_run.txt
+
+# E83: the audit tool ships SHAPES ONLY so that it is not itself an index of
+# the operator's identifiers. The exact literals for THIS installation live
+# here and are never published. Per the gitignore-hides-data law: back this up
+# explicitly, and write a fresh one on any other box rather than copying it.
+tools/scrub_local.json
+
+captures/
+*.cs16
+*.cf32
+*.cu8
+*.cs8
+*.iq
+*.raw
+*.sigmf-data
+*.ts
+
+__pycache__/
+*.pyc
+
+# scratch run logs (the committed reports are SELFTEST_RESULTS.txt and
+# SWEEP_RESULTS.txt; these are intermediates)
+st_quick.txt
+sweep_quick.txt
+poscontrol.txt
+injsweep*.txt
+deeptest*.txt
+
+# ETSI specs are free to DOWNLOAD but not ours to REDISTRIBUTE -- keep the
+# PDFs out of the repo. Same law as lab/: back them up explicitly.
+spec/
+
+# the spec archive and its extracted C file are ETSI material too
+spec/
+data/
+spec/*.pdf
+spec/*.zip
+*.wav
+*.mp4
+*.m4s
+*.sup
+
+# Responsible-disclosure package -- private, never publish (session keys captured off air)
+/disclosure/
+lab/**/lls_255_reserved*.xml
+lab/**/*lls255*.xml
+
+# --- publish scrub (E83+) : never ship broadcast media, receivable lineups, or the raw lab notebook ---
+lab/**/*.mp4
+lab/**/*_frame*.png
+lab/e70_out/e70_hdhr_lineup.json
+lab/e81_out/flex_probe.json
+lab/e70_out/grid_guide.html
+lab/e70_out/grid_now.html
+lab/LIVE_TV_LAB.md
+PORT.md
+lab/**/*_SLT_*.xml
+lab/**/*_slt.xml
+lab/**/obj_*.bin
+release/
+SCRUB_AUDIT.md
+
+# the banked NUMERIC tables ship (facts, not the standards documents)
+!lab/spec_bank/
+!lab/spec_bank/**

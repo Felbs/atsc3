@@ -1,0 +1,180 @@
+{
+  "version": 1,
+  "_comment": [
+    "Per-carrier front-end gain. The tuner is SINGLE-TENANT, so whichever",
+    "carrier we are on dictates the setting -- which makes the right gain a",
+    "property OF THE CARRIER, not a global constant. Two measurements on",
+    "2026-08-10 proved one setting cannot serve both: RF33 reads 0.0% FEC at",
+    "rfgain_sel 2 while an HDHomeRun on the same feed decodes at snq=100",
+    "(E73), and RF25 prefers 2 over 4 by +6.04 dB (E76).",
+    "",
+    "Every entry records HOW it was measured, WHEN, and the number that",
+    "decided it, so a later reader can re-run the comparison instead of",
+    "trusting the value. An entry without provenance is a rumour."
+  ],
+  "default": {
+    "rfgain_sel": 4,
+    "ifgr": 32,
+    "measured": false,
+    "why": [
+      "For a carrier we have never measured, 4 is chosen on ASYMMETRY OF",
+      "HARM, not on preference. Measured worst cases: RF33 at 2 = TOTAL",
+      "loss (0.0% FEC, E73); RF25 at 4 = still decodes, just 6.04 dB",
+      "thinner (18.89 -> 12.85 dB, 6962 LDPC blocks converged and a",
+      "picture built from the g4 capture, E75/E76). So a wrong 4 costs",
+      "margin; a wrong 2 can cost the whole carrier. The old implicit",
+      "global default was 2, and that is exactly what produced E73's",
+      "total-loss surprise on the primary channel.",
+      "This is a placeholder, not a recommendation: run calibrate for any",
+      "carrier that matters."
+    ]
+  },
+  "carriers": {
+    "8": {
+      "rfgain_sel": null,
+      "ifgr": 32,
+      "measured": false,
+      "measured_utc": "2026-08-11T17:10",
+      "method": "NOT MEASURED -- single successful L1 decode, no A/B",
+      "evidence": "E88 (discovery), window 3",
+      "metric": {
+        "kind": "l1_decode_once",
+        "at_2": "L1 decoded: FFT 8K, GI 768, Cred 0, SP4_2, 23 sym, 34.407 ms Frame, PLP0 QPSK 9/15 + PLP1 256QAM 9/15, HYBRID interleaver, not LDM",
+        "at_4": "failed",
+        "at_0": "failed",
+        "fec": "0/17020 -- 34 acquisitions, never converged",
+        "reverified": false
+      },
+      "notes": [
+        "rfgain_sel is deliberately null. ONE L1 at one gain is not an",
+        "A/B, and a later 190 s run did not reproduce it -- so there is",
+        "no value here honest enough to quote. Needs a proper",
+        "interleaved sweep (2/4/2/4, non-adjacent) before it earns one.",
+        "",
+        "HAZARD, and the reason this entry exists at all rather than",
+        "being left absent: the DEFAULT IS 4, AND 4 IS THE VALUE THAT",
+        "FAILED HERE. An absent entry is not neutral -- lookup() would",
+        "hand RF8 the one setting we have evidence against, and the",
+        "failure would look like 'RF8 is undecodable' rather than 'we",
+        "tuned it wrong'. Any RF8 work must pass an EXPLICIT gain.",
+        "",
+        "This also bounds the default's own justification. 'A wrong 4",
+        "costs margin; a wrong 2 can cost the whole carrier' was induced",
+        "from RF33 and RF25, both UHF and both strong. RF8 is VHF-high",
+        "at 183 MHz on the discone and inverts the asymmetry: here 4",
+        "cost everything and 2 was the one that worked. The default is",
+        "a UHF rule wearing a global name.",
+        "",
+        "Antenna matters more than gain for this carrier: yagi pr 14.6",
+        "vs discone pr 56.6. The discone is RF8's antenna."
+      ]
+    },
+    "25": {
+      "rfgain_sel": 2,
+      "ifgr": 32,
+      "measured": true,
+      "measured_utc": "2026-08-10T22:57",
+      "method": "banked-capture A/B, 150 frames each, three minutes apart",
+      "antenna": "Antenna B (Old Faithful yagi)",
+      "antenna_caveat": [
+        "E90: GAIN IS ANTENNA-SPECIFIC AND THIS VALUE IS NOT PORTABLE.",
+        "It was measured on the yagi, where RF25 is a weak carrier (peak",
+        "-12.6 dBFS at rfgain_sel 2, and 2 was chosen for the +6.05 dB of",
+        "margin it bought a signal that barely worked). On the Philips",
+        "(Antenna A) RF25 is a STRONG carrier -- 83.2 vs the yagi's 62.9",
+        "-- and it decoded live at 94.5% FEC. A setting picked to rescue",
+        "a starved feed is exactly the setting most likely to overload a",
+        "healthy one, which is the RF33-at-2 failure in mirror image.",
+        "No new value is asserted here: nothing has been measured on the",
+        "Philips. Anyone tuning RF25 on Antenna A must run their own A/B",
+        "and add a separate entry rather than inheriting this one."
+      ],
+      "evidence": "E75/E76",
+      "captures": {
+        "chosen": "rf25_fox_g2_0810_2257.cs16",
+        "alternative": "rf25_fox_g4_0810_2254.cs16"
+      },
+      "metric": {
+        "kind": "snr_db_median",
+        "at_2": 18.895,
+        "at_4": 12.846,
+        "delta_db": 6.049,
+        "frames_locked": "150/150 both"
+      },
+      "headroom": {
+        "peak_dbfs_at_2": -12.6,
+        "peak_dbfs_at_4": -18.0,
+        "full_scale_samples": 0,
+        "note": "does not overload at 2 -- it is a much weaker carrier"
+      },
+      "notes": [
+        "RF25 = the WBFF multiplex (E94: WBFF is the HOST LICENSEE, not",
+        "a service name -- the carrier holds WNUV 54.1 on MMTP and",
+        "WBFFMob on ROUTE/DASH). Do not call this entry Fox. Both gains",
+        "decode; 2 buys 6.04 dB of margin."
+      ]
+    },
+    "33": {
+      "rfgain_sel": 4,
+      "ifgr": 32,
+      "measured": true,
+      "measured_utc": "2026-08-10",
+      "method": "live A/B on air, FEC percentage over ~14 samples per setting",
+      "antenna": "Antenna B (Old Faithful yagi)",
+      "evidence": "E73",
+      "metric": {
+        "kind": "fec_pct_mean",
+        "at_2": 0.0,
+        "at_4": 100.0,
+        "at_6": 100.0,
+        "inst_rt_at_2": 0.386,
+        "inst_rt_at_4": 1.016
+      },
+      "headroom": {
+        "note": "strong local carrier; 2 overloads the front end totally"
+      },
+      "notes": [
+        "REQUIRES 4. At 2 we read 0.0% FEC while an HDHomeRun on the same",
+        "feed decoded at snq=100 -- total, not marginal. 6 also reads",
+        "100.0%; 4 is seeded as the lower of the two that work.",
+        "Independent corroboration: the splitter A/B measured 100.0%",
+        "decodable at rfgain 4 vs 97.8% at 2 on the same feed."
+      ]
+    },
+    "30": {
+      "rfgain_sel": null,
+      "ifgr": 32,
+      "measured": false,
+      "measured_utc": "2026-08-10",
+      "method": "capture decoded, but the gain used was NOT recorded",
+      "evidence": "E69",
+      "captures": {"chosen": "rf30_158p5_0810.cs16"},
+      "metric": {
+        "kind": "decode",
+        "converged_blocks": 3186,
+        "bch_ok": 3186,
+        "core_pct": 99.87,
+        "peak_dbfs": -21.0,
+        "full_scale_samples": 0
+      },
+      "notes": [
+        "RF30 DECODED, and at -21.0 dBFS it had real headroom -- but the",
+        "rfgain_sel in force during that capture was never written down,",
+        "so no value can honestly be seeded. rfgain_sel is deliberately",
+        "null: lookup() will fall back to the default AND report",
+        "measured=false. Populate with one A/B when the radio is free.",
+        "Recording the gain in the capture sidecar would have made this",
+        "entry free -- see E77 open items."
+      ]
+    }
+  },
+  "atsc1_carriers": {
+    "_comment": [
+      "8-VSB carriers seen by the HDHomeRun band scans of 8/08 and 8/10.",
+      "They are NOT decoded by this chain (it is an ATSC 3.0 receiver), so",
+      "no gain has ever been measured for them and none is invented here.",
+      "Listed so a future scan/tune path has somewhere to record one."
+    ],
+    "carriers": {}
+  }
+}
