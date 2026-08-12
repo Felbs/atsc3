@@ -77,7 +77,11 @@ def check_modules() -> None:
                   "create_time identity; without it orphan reaping is weaker)",
         "fitz": "pymupdf -- a RUNTIME import for the AC-4 scalefactor-band "
                 "tables (m27_sfb parses the ETSI PDF on import)",
-        "SoapySDR": "the live radio path only; replay works without it",
+        # Reported on EVERY run, not just --radio. Live tuning is the headline
+        # feature, so a default run that says "0 problems" and is then followed
+        # by ModuleNotFoundError on `atsc3 watch` is a false all-clear.
+        "SoapySDR": "LIVE TV. Without it `atsc3 watch --rf N` cannot open a "
+                    "radio -- only `--capture FILE` replay works",
         "torch": "the OPTIONAL gpu-full accelerator; never required",
     }
     for mod, why in required.items():

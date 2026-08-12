@@ -2042,7 +2042,21 @@ class SdrSource:
         return (lo + 3.0) * 1e6
 
     def open(self):
-        import SoapySDR
+        # Live tuning is the headline feature, so a missing SoapySDR is the
+        # most likely first-run failure. Say what is wrong and what to do
+        # instead of unwinding a stack the reader did not ask for.
+        try:
+            import SoapySDR
+        except ImportError:
+            raise SystemExit(
+                "\nThis needs SoapySDR, which is not importable from this "
+                "Python.\n\n"
+                "  * install it with a driver for your radio, or\n"
+                "  * decode a banked capture instead, which needs no radio:\n"
+                "        python -m atsc3 watch --capture FILE --rate 6.144e6\n\n"
+                "If SoapySDR IS installed, it may belong to a different "
+                "interpreter\nthan the one running this. Check with:\n"
+                "        python tools/atsc3_doctor.py --radio\n")
         from SoapySDR import SOAPY_SDR_CS16, SOAPY_SDR_RX
         SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
         if self.rl is not None:
