@@ -139,13 +139,29 @@ identical to a live decode of the same air.
 The gate re-decodes the same signal through an independent offline path and
 checks the streaming receiver against it — the receiver's own honesty test:
 
+The gate runs on a **capture**, not on live air — both paths have to decode the
+same samples for the comparison to mean anything. Record one first:
+
 ```
-python -m atsc3 gate --rf N
+python tools/atsc3_capture.py --rf N --secs 12 --out signal.cs16
+python -m atsc3 gate --capture signal.cs16 --rate 6912000
 ```
 
-A pass means the live streaming path produced **byte-identical** output (matching
-SHA-256) to the reference batch decode. This is the check that separates a
-picture that is *correct* from one that merely *looks* correct.
+`atsc3_capture.py` refuses to bank a clipped or short capture (`VERDICT: VOID`)
+— if it says so, add attenuation with `--rfgain`/`--ifgr` and record again.
+
+The leg that matters is **`end_to_end`**: it passes only when the streaming
+receiver's IP datagrams are **byte-identical** (matching SHA-256) to the
+reference batch decode of the same samples. That is what separates a picture
+that is *correct* from one that merely *looks* correct.
+
+> **Known issue — `resampler_8` / `resampler_10` may FAIL.** These legs assert
+> that the blocked resampler is *bit*-identical to `scipy.signal.resample_poly`
+> over a synthetic signal, and some SciPy builds round the last bit differently
+> (observed: ~1.2e-06 max delta on SciPy 1.15.2, about 10 float32 ULP). It does
+> not affect decoding — `end_to_end` still reports identical datagrams. The
+> check is deliberately left strict rather than loosened to hide the
+> difference.
 
 ---
 
