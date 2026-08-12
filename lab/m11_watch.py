@@ -1330,7 +1330,11 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="atsc3 watch",
         description="Tune an ATSC 3.0 multiplex and play it live.")
-    ap.add_argument("--rf", type=int, required=True, help="RF channel number (required)")
+    # Required for LIVE tuning only. A shipped default is wrong for every
+    # reader, but --capture replays a file and has no channel to speak of, so
+    # demanding one there is a made-up obstacle.
+    ap.add_argument("--rf", type=int, default=None,
+                    help="RF channel number (required unless --capture)")
     ap.add_argument("--rate", type=float, default=ST.FS_POST,
                     help="capture rate; 6912000 makes the resampler vanish")
     ap.add_argument("--ant", default="Antenna B")
@@ -1466,6 +1470,9 @@ def main(argv=None):
     ap.add_argument("--force-meteor", action="store_true",
                     help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
+    if a.rf is None and not a.capture:
+        ap.error("--rf is required when tuning a radio "
+                 "(not needed with --capture, which replays a file)")
 
     if a.no_margin:
         # before any worker spawns: the config rides the environment
@@ -1531,6 +1538,12 @@ def main(argv=None):
         print(f"    *** UNDERRUNS      {p['underruns']}  "
               f"(min buffer {p['min_buffer_s']} s, prebuffer "
               f"{p['prebuffer_s']} s) ***")
+    elif getattr(a, "player", None) == "none":
+        # Headless was ASKED FOR. Saying "never started" here reads as a
+        # failure and sends the reader hunting a decode problem that is not
+        # there -- the media lanes are on disk either way.
+        print("    player             disabled (--player none); "
+              "media written to the live dir")
     else:
         print("    player             NEVER STARTED -- no complete video MPU")
     b = s["frame_budget_ms"]

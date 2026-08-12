@@ -8,9 +8,10 @@ failures by name:
 python tools/atsc3_doctor.py
 ```
 
-> **`--rf N` is required.** There is no default channel; a shipped default would
-> be wrong for everyone but the person who shipped it. Find your local NextGen TV
-> (ATSC 3.0) channel with a channel scan or a coverage map first.
+> **`--rf N` is required when tuning a radio.** There is no default channel; a
+> shipped default would be wrong for everyone but the person who shipped it.
+> Find your local NextGen TV (ATSC 3.0) channel with a channel scan or a
+> coverage map first. Replaying a file with `--capture` needs no `--rf`.
 
 ---
 
@@ -35,13 +36,15 @@ Common options:
 | `--player-args "…"` | pass extra arguments through to the player |
 | `--rfgain N` / `--ifgr N` | set SDR RF gain / IF gain reduction (per-site; tune for your antenna) |
 | `--ant NAME` | choose the SDR antenna port |
-| `--report OUT.json` *(alias `--json`)* | write the full run telemetry as JSON |
+| `--json OUT.json` | write the full run telemetry as JSON |
+| `--report N` | progress-line interval in seconds (default 5) |
+| `--live-dir DIR` | where the media lanes are written (video/audio/subtitle tracks) |
 
 Example — record 5 minutes headless, keep the telemetry:
 
 ```
 python -m atsc3 watch --rf N --secs 300 --player none \
-    --record tonight.mp4 --report tonight.json
+    --record tonight.mp4 --json tonight.json
 ```
 
 ---
