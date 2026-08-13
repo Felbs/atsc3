@@ -1573,11 +1573,29 @@ def main(argv=None):
               f"(min buffer {p['min_buffer_s']} s, prebuffer "
               f"{p['prebuffer_s']} s) ***")
     elif getattr(a, "player", None) == "none":
-        # Headless was ASKED FOR. Saying "never started" here reads as a
-        # failure and sends the reader hunting a decode problem that is not
-        # there -- the media lanes are on disk either way.
-        print("    player             disabled (--player none); "
-              "media written to the live dir")
+        # Headless was ASKED FOR, so "never started" would read as a failure
+        # and send the reader hunting a decode problem that is not there.
+        #
+        # But do not claim the media is on disk without checking. The
+        # LiveWriter is only constructed when --live-dir is given, and
+        # --player none does NOT imply it -- so the earlier wording here
+        # ("media written to the live dir") was false on the common
+        # `--player none` run, which is worse than the message it replaced:
+        # it sends the reader looking for a file that was never written.
+        ld = getattr(a, "live_dir", None)
+        if ld:
+            try:
+                n = sum(1 for _ in os.scandir(ld))
+            except OSError:
+                n = -1
+            where = f"{ld}" + (f" ({n} files)" if n >= 0 else " (unreadable)")
+            print(f"    player             disabled (--player none); "
+                  f"media written to {where}")
+        else:
+            print("    player             disabled (--player none), and no "
+                  "--live-dir was given --")
+            print("                       the decode ran but NOTHING was "
+                  "written to disk. Add --live-dir PATH to keep it.")
     else:
         print("    player             NEVER STARTED -- no complete video MPU")
     b = s["frame_budget_ms"]
