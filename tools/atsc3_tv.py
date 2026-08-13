@@ -1362,7 +1362,14 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
                 "--http-port", str(http[0]), "--http-password", http[1]]
     if start_time:
         cmd += [f"--start-time={start_time:.1f}"]
-    cmd.append(out_ts)
+    # NORMALISE THE PATH. VLC-on-Windows silently refuses a path that mixes
+    # separators -- `Z:/src/proj/live\_tv\live_tv2.ts` (which is what
+    # os.path.join produces when --live-dir was typed with forward slashes,
+    # e.g. from a bash/MSYS shell) yields "main playlist: playlist is empty"
+    # and NO error about the file. VLC then exits, the supervisor reads that
+    # as "player ended", and respawns forever: a blank window over a perfect
+    # decode. The all-backslash form of the SAME file opens and demuxes.
+    cmd.append(os.path.normpath(out_ts))
     return subprocess.Popen(cmd, env=display_env(),
                             start_new_session=not IS_WIN)
 
