@@ -2067,7 +2067,21 @@ class SdrSource:
                     f"radio held by {h.get('owner')} "
                     f"(priority {h.get('priority')}); not seizing")
             self.held = True
-        self.sdr = SoapySDR.Device("driver=sdrplay")
+        # docs/install/raspberry-pi.md offers "SoapyRemote split-decode" -- let
+        # the Pi hold the radio and a faster desktop do the decoding -- but the
+        # device string was hardcoded, so the documented mode could not be
+        # reached from this path at all. Same ATSC3_* convention as the notch
+        # switches above.
+        #
+        #   Pi:       SoapySDRServer --bind
+        #   desktop:  ATSC3_SOAPY_ARGS="driver=remote,remote=192.168.x.y,remote:driver=sdrplay"
+        #
+        # Raw IQ at 6.912 Msps CS16 is ~221 Mbit/s: comfortable on wired
+        # gigabit, hopeless on wifi. Measure the link before blaming the decode.
+        _args = os.environ.get("ATSC3_SOAPY_ARGS", "driver=sdrplay")
+        if _args != "driver=sdrplay":
+            log(f"  SDR device args overridden: {_args}")
+        self.sdr = SoapySDR.Device(_args)
         self.sdr.setSampleRate(SOAPY_SDR_RX, 0, self.want_rate)
         time.sleep(0.2)
         # a write without a readback is a hope, not a setting

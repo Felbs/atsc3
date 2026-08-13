@@ -51,6 +51,31 @@ The doctor knows every failure below by name and tells you which one you have.
   recordings fine, just not in real time.
 * A **short, direct USB 3.0** connection. Not a hub, not a long cable, and route
   it away from the antenna coax — a cable-tie bundle of USB and coax is an
+
+### If the machine with the antenna is not the machine with the CPU
+
+A small board can hold the radio while a faster computer does the decoding.
+The radio end runs the SoapySDR network server:
+
+```
+sudo apt-get install -y soapysdr-module-remote     # once
+SoapySDRServer --bind
+```
+
+and the decoding end points at it:
+
+```
+ATSC3_SOAPY_ARGS="driver=remote,remote=<radio-host>,remote:driver=sdrplay"   python -m atsc3 watch --rf 33 --player ffplay
+```
+
+`ATSC3_SOAPY_ARGS` replaces the default `driver=sdrplay`, so it also works for
+any other SoapySDR device.
+
+**Check the link first.** Raw IQ at 6.912 Msps CS16 is about **221 Mbit/s**.
+That is comfortable on wired gigabit and hopeless on wifi -- and a starved
+link looks exactly like a bad antenna. Measured on a Raspberry Pi 5 serving a
+desktop over gigabit ethernet: **1.00x real time, FEC 100.0%, zero
+underruns**, while that same Pi decoding for itself manages only 0.51x.
   antenna, and USB 3.0 is a notorious UHF noise radiator.
 
 **Software**
