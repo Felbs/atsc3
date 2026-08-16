@@ -11,7 +11,7 @@ pretending.
 | 2. ffmpeg + a player | 2 min | decodes, cannot watch |
 | 3. *(optional)* the standards documents | 0 min — **tables now ship** | nothing; only needed to re-derive tables |
 | 4. SDR driver + SoapySDR | 5 min | replay works, live does not |
-| 5. optional C LDPC kernel | 2 min | ~7× slower LDPC stage |
+| 5. C LDPC kernel | 2 min | single-layer carriers ~7× slower LDPC; **LDM carriers unwatchable (0.04x)** |
 | 6. first tune | 1 min | — |
 
 **You do not need a GPU, and you do not need `torch`.** Nothing in that table
@@ -283,9 +283,14 @@ python tools/atsc3_doctor.py --capture yourfile.cs16 --rate 6.912e6
 
 ---
 
-## 5. The optional C LDPC kernel
+## 5. The C LDPC kernel
 
-Worth roughly **7× on the LDPC stage**. Everything works without it.
+On a single-layer carrier it is worth roughly **7× on the LDPC stage** and
+everything works without it. On an **LDM (two-layer) carrier it is not
+optional**: the LDM demod pool cannot use the GPU, so its LDPC runs on this
+kernel or on the numpy fallback — measured 8/15 on the same carrier and
+antenna six minutes apart, **0.04x without it, 1.01x with it**. The chain
+warns at LDM plan adoption when it is missing; the doctor warns too. Build it.
 
 ```
 python lab/build_ldpc_kernel.py

@@ -1911,6 +1911,17 @@ class LdmPipeline:
         self.cti = CtiStream(plan)
         self.ph = PhaseTracker(plan, log=self.log)
         self.log("  LDM plan adopted --\n    " + plan.describe())
+        # On an LDM carrier the LDPC runs inside the demod POOL, and pool
+        # workers cannot reach the GPU -- they use the compiled C kernel or
+        # the numpy fallback. Measured 8/15, same carrier, same antenna, six
+        # minutes apart: fallback 0.04x, kernel 1.01x. So here the kernel
+        # is not "optional, ~7x on one stage"; it is the difference between
+        # television and a stopped clock, and the one-line stderr warning
+        # from m3_ldpc is not proportionate to that. Say it where it bites.
+        if not LD._kernel_lib():
+            self.log("  ** LDM carrier WITHOUT the compiled LDPC kernel: expect "
+                     "~0.04x real time (measured), i.e. no watchable picture. "
+                     "Build it once per box: python lab/build_ldpc_kernel.py")
 
     def prewarm(self):
         if self.fd is not None:

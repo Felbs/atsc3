@@ -198,8 +198,10 @@ def check_ldpc_kernel() -> None:
         return
     if not out.exists():
         record(WARN, "LDPC C kernel", "not built",
-               "OPTIONAL but worth ~7x on the LDPC stage: run "
-               "`python lab/build_ldpc_kernel.py`, then `python lab/gate_e54.py`. "
+               "Single-layer carriers: ~7x on the LDPC stage, the GPU path covers "
+               "you. LDM (two-layer) carriers: REQUIRED -- the demod pool cannot "
+               "use the GPU and measured 0.04x without it vs 1.01x with (8/15). "
+               "Run `python lab/build_ldpc_kernel.py`, then `python lab/gate_e54.py`. "
                "Needs any C compiler. On Windows with MSYS2, "
                r"C:\msys64\mingw64\bin must LEAD your PATH or cc1 dies with no "
                "message at all.")

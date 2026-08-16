@@ -944,6 +944,19 @@ class Transport:
             self.stats["flow_" + k[0]] += 1
             log(f"  flow gate: {len(buf)} datagrams -> "
                 f"{'MMTP (ver_ext=%d, %d/%d length agreement)' % (best_v, ok, tot) if is_mmtp else ('ROUTE/LCT (%d/%d parse) -- carrying as DASH lanes' % (n_lct, len(buf))) if is_route else 'not MMTP (LCT hits %d)' % n_lct}")
+            if (not is_mmtp and not is_route
+                    and n_lct >= max(1, len(buf) // 2)):
+                # 8/15, RF30: the gate classified the flow as LCT and the
+                # chain then ran two clean minutes at FEC 100% with "0 MPUs
+                # complete" and no word about why. ROUTE stays explicit --
+                # a locked service must never be carried by accident -- but
+                # the operator cannot NAME a flow they were never told
+                # about. Say the address and the flag, once per flow.
+                log(f"  flow gate: {key_s} is ROUTE/LCT ({n_lct}/{len(buf)} "
+                    f"parse) and was NOT named -- this multiplex delivers "
+                    f"over ROUTE/DASH, not MMTP. To carry it as DASH lanes "
+                    f"rerun with --route {key_s} (clear services only: "
+                    f"run tools/atsc3_inspect.py first, USAGE section 5).")
             if is_mmtp:
                 self.mmtp[key] = MpuStreamer(best_v, repair=self.repair)
             elif is_route:
@@ -2081,7 +2094,30 @@ class SdrSource:
         _args = os.environ.get("ATSC3_SOAPY_ARGS", "driver=sdrplay")
         if _args != "driver=sdrplay":
             log(f"  SDR device args overridden: {_args}")
-        self.sdr = SoapySDR.Device(_args)
+        # A BUSY radio is not a MISSING radio. The SDRplay API keeps a
+        # just-closed device unavailable for a few seconds while the previous
+        # process tears down (an LDM pool has six of them), and Device() then
+        # says "no available RSP devices found" -- the same words it uses for
+        # an unplugged cable. Back-to-back tunes (a channel scan, a stress
+        # matrix, a user retrying) hit this every time (8/15: RF29 died 4 s
+        # after RF25 exited). Retry for a bounded window before believing it.
+        _deadline = time.time() + 20.0
+        _tries = 0
+        while True:
+            try:
+                self.sdr = SoapySDR.Device(_args)
+                break
+            except RuntimeError as e:
+                _tries += 1
+                if time.time() >= _deadline:
+                    raise RuntimeError(
+                        f"{e} (after {_tries} tries over 20 s -- if the "
+                        f"radio IS plugged in, another process still holds "
+                        f"it: check with the doctor's process census)") from e
+                if _tries == 1:
+                    log(f"  radio not available yet ({e}); retrying for "
+                        f"up to 20 s -- a just-closed device takes a moment")
+                time.sleep(2.0)
         self.sdr.setSampleRate(SOAPY_SDR_RX, 0, self.want_rate)
         time.sleep(0.2)
         # a write without a readback is a hope, not a setting

@@ -982,11 +982,22 @@ def build_lineup(sources=None, at=None):
     carriers = OrderedDict()
     flows = {}
     live_dirs = []
+    non_slt = []
     for d in dirs:
         # SLTs
         for f in sorted(glob.glob(os.path.join(d, "lls_*.xml"))):
             c = parse_slt(f)
             if not c:
+                # An LLS table that is not an SLT. 8/15, RF30: the ONLY table
+                # on that carrier was table_id 255 (reserved/private, a
+                # datacast), and this tool printed a header and nothing else
+                # -- indistinguishable from "no signalling decoded". Record
+                # what WAS there so the report can say so.
+                try:
+                    tag = _ln(ET.parse(f).getroot().tag)
+                except Exception:                                # noqa: BLE001
+                    tag = "(unparseable)"
+                non_slt.append((_rel(f), tag))
                 continue
             key = c["bsid"]
             if key not in carriers:
@@ -1143,7 +1154,8 @@ def build_lineup(sources=None, at=None):
 
     return {"build": BUILD, "at": at,
             "sources": [_rel(d) for d in dirs],
-            "carriers": carriers, "esg": esg, "live": lives}
+            "carriers": carriers, "esg": esg, "live": lives,
+            "non_slt_lls": non_slt}
 
 
 # RF channel -> centre frequency, for display only (A/321 US UHF/VHF plan).
@@ -1293,6 +1305,20 @@ def report(model, only=None, verbose=False, out=sys.stdout):
           (len(e["rows"]), e["services"], _fmt_time(e["span"][0]),
            _fmt_time(e["span"][1]), ", ".join(e["sources"])))
     w("\n")
+    if not model["carriers"]:
+        ns = model.get("non_slt_lls") or []
+        if ns:
+            w("NO SLT (service list) in any source -- no television services "
+              "are signalled here.\nLLS tables that WERE present:\n")
+            for path, tag in ns:
+                w("    %s   root element <%s>\n" % (path, tag))
+            w("A carrier that signals only reserved/private LLS tables is a "
+              "datacast (a data service riding\nATSC 3.0), not a television "
+              "multiplex: nothing here is watchable, and nothing is "
+              "encrypted either.\n")
+        else:
+            w("NO SLT and no other LLS table in any source -- nothing was "
+              "decoded to inspect.\n")
 
     for bsid, c in model["carriers"].items():
         w("=" * 78 + "\n")
