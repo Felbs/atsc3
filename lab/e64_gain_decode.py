@@ -27,8 +27,12 @@ def decode(path, tag):
     for k in ("OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "OMP_NUM_THREADS"):
         env[k] = "2"
     flags = subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == "nt" else 0
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
-                       env=env, creationflags=flags, timeout=900)
+    try:
+        r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True,
+                           env=env, creationflags=flags,
+                           timeout=900)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        r = subprocess.CompletedProcess(cmd, -1, e.stdout or "", e.stderr or "")
     txt = (r.stdout or "") + (r.returncode and (r.stderr or "") or "")
     # cumulative FEC counter from the status lines: FEC good/total
     tot = re.findall(r"FEC (\d+)/(\d+)", txt)

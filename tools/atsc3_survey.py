@@ -40,8 +40,26 @@ from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CS16                 # noqa: E402
 import m2_pilots as MP                                            # noqa: E402
 from atsc3 import bootstrap as bs                                 # noqa: E402
 
+# --- radio_lock: the SDR is single-tenant; every consumer must arbitrate ----
+# radio_lock lives in the sibling gr-radiotuna toolbox (fleet layout:
+# <src>/atsc3 and <src>/gr-radiotuna are siblings). Honour an explicit
+# ATSC3_SIBLING_TOOLS override, else guess the sibling path. Degrade to a
+# no-op ONLY if it genuinely cannot be found -- the survey still runs, but
+# it says so, because a silent no-op lock is how band_sweep's discipline
+# quietly evaporated.
+for _cand in [os.environ.get("ATSC3_SIBLING_TOOLS"),
+              os.path.join(os.path.dirname(ROOT), "gr-radiotuna", "tools")]:
+    if _cand and os.path.isfile(os.path.join(_cand, "radio_lock.py")):
+        sys.path.insert(0, _cand)
+        break
+try:
+    import radio_lock                                             # noqa: E402
+except Exception:                                                 # noqa: BLE001
+    radio_lock = None
+
 SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
 FS = 6.912e6
+OWNER, PRI = "atsc3_survey", 50    # lab priority: yields to sat passes + humans
 
 
 def center_hz(rf):
@@ -74,6 +92,18 @@ def main():
     lo, hi = (int(x) for x in a.channels.split("-"))
     chans = list(range(lo, hi + 1))
 
+    if radio_lock is not None:
+        if not radio_lock.acquire(OWNER, "ATSC 3.0 band survey", PRI,
+                                  wait_s=120):
+            h = radio_lock.status() or {}
+            log(f"radio busy: {h.get('owner')} (prio {h.get('priority')}) "
+                f"-- not seizing. Run again later.")
+            return 2
+    else:
+        log("WARNING: radio_lock not found -- opening the SDR WITHOUT "
+            "arbitration. Set ATSC3_SIBLING_TOOLS to the gr-radiotuna/tools "
+            "dir to honour the single-tenant lock.")
+
     sdr = SoapySDR.Device("driver=sdrplay")
     sdr.setSampleRate(SOAPY_SDR_RX, 0, FS)
     time.sleep(0.2)
@@ -92,9 +122,18 @@ def main():
     sdr.activateStream(st)
     buf = np.empty(2 * 65536, np.int16)
     results = []
+    hb = [time.time()]                 # heartbeat timer -- never per-read
+    yielded = False
     log(f"surveying RF{lo}-RF{hi} at {fs/1e6:.3f} Msps on {a.ant}")
     try:
         for rf in chans:
+            # A higher-priority waiter (a sat pass, a human) outranks the
+            # lab survey: drop the radio at the next channel boundary.
+            if radio_lock is not None and radio_lock.should_yield():
+                log("yielding the radio to a higher-priority waiter -- "
+                    "stopping the survey early.")
+                yielded = True
+                break
             sdr.setFrequency(SOAPY_SDR_RX, 0, center_hz(rf))
             time.sleep(0.25)
             # flush the retune transient
@@ -107,6 +146,9 @@ def main():
             deadline = time.time() + a.secs * 2 + 3
             while got < n_want and time.time() < deadline:
                 r = sdr.readStream(st, [buf], 65536, timeoutUs=500000)
+                if radio_lock is not None and time.time() - hb[0] >= 5.0:
+                    hb[0] = time.time()
+                    radio_lock.heartbeat()
                 if r.ret > 0:
                     n = min(r.ret, n_want - got)
                     x = buf[:2 * n].astype(np.float32).view(np.complex64)
@@ -133,8 +175,11 @@ def main():
         except Exception:                                      # noqa: BLE001
             pass
         del sdr
+        if radio_lock is not None:
+            radio_lock.release(OWNER)
     json.dump(dict(when=time.strftime("%Y-%m-%d %H:%M"),
-                   ant=a.ant, secs=a.secs, results=results),
+                   ant=a.ant, secs=a.secs, results=results,
+                   yielded=yielded),
               open(a.out, "w"), indent=1)
     n3 = sum(1 for r in results if r.get("atsc3"))
     log(f"survey complete: {n3} ATSC 3.0 carrier(s) of {len(chans)} channels "

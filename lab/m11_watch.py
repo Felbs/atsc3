@@ -1207,7 +1207,7 @@ class LiveWriter:
                                         media=0.0, name=name, kind=kind,
                                         pid=pid, idx=idx, first_seq=None,
                                         last_seq=None, init_bytes=len(init or b""),
-                                        generation=gen)
+                                        generation=gen, tick_hz=None)
             ST.log(f"  live lane: {kind} pid {pid} -> {os.path.basename(path)}")
         return ln
 
@@ -1229,13 +1229,26 @@ class LiveWriter:
         ln["fh"].flush()
         seq = seg.get("seq")
         ln["idx"].write(json.dumps(dict(seq=seq, off=off, len=len(body),
-                                        dur=seg.get("dur", 0))) + "\n")
+                                        dur=seg.get("dur", 0),
+                                        tick_hz=seg.get("tick_hz"))) + "\n")
         if ln["first_seq"] is None:
             ln["first_seq"] = seq
         ln["last_seq"] = seq
         ln["bytes"] += len(body)
         ln["segments"] += 1
-        ln["media"] += seg.get("dur", 0) / 90000.0
+        # E93: divide by the PRODUCER-STAMPED unit, never an assumed 90 kHz.
+        # foxlive (ATEME, 240000 ticks/s) over-counted every lane's media_s
+        # by exactly 8/3 through this line while all four lanes "agreed" -
+        # one shared accounting path is one shared bug.
+        thz = seg.get("tick_hz")
+        if thz:
+            ln["tick_hz"] = thz
+        elif not ln.get("_thz_warned"):
+            ln["_thz_warned"] = True
+            ST.log(f"  E93 WARNING: lane pid {pid} segments carry no tick_hz "
+                   f"- assuming 90000. If this encoder muxes at 240 kHz the "
+                   f"media_s below over-counts by 2.667x.")
+        ln["media"] += seg.get("dur", 0) / float(thz or 90000)
         now = time.time()
         if now - self._last_meta >= 1.0:
             self._last_meta = now
@@ -1248,6 +1261,7 @@ class LiveWriter:
                     kind=ln["kind"], pid=ln["pid"],
                     first_seq=ln["first_seq"], last_seq=ln["last_seq"],
                     init_bytes=ln["init_bytes"],
+                    tick_hz=ln.get("tick_hz"),
                     idx=os.path.splitext(ln["path"])[0] + ".idx",
                     generation=ln.get("generation", 0),
                     handler=(ln["handler"] or b"?").decode("ascii", "replace"))

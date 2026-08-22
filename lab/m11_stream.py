@@ -814,6 +814,12 @@ class RouteStream:
                 self.done.add(kk)
                 self.stats["lost"] += 1
             out.append(dict(seq=toi, bytes=data, dur=rep["dur"],
+                            # E93: this path renormalised dur to a synthetic
+                            # 90 kHz clock at SLS parse - so 90000 is the
+                            # TRUE unit here even though the track's own
+                            # mdhd says 240000. Only a producer stamp is
+                            # safe; deriving from mdhd would mirror the bug.
+                            tick_hz=90000,
                             pid=self.PID_BASE + tsi, handler=rep["handler"],
                             init=self.init[tsi], transport="route",
                             lane_kind=rep["kind"], samples=None, kept=None))
@@ -1149,9 +1155,18 @@ class Transport:
         st["base_time"] += dur
         st["last_dur"] = dur           # what a whole MPU is worth on this asset
         self.stats["segment"] += 1
+        if st.get("tick_hz") is None and st.get("init"):
+            # E93: `dur` is in the TRACK'S OWN mdhd timescale - foxlive's
+            # ATEME encoder muxes at 240000, not the 90000 this pipeline
+            # grew up on, and the assumption over-counted media_s by 8/3.
+            # Stamp the unit NEXT TO the value so no consumer assumes again.
+            # (Never renormalise dur itself: it feeds base_time -> tfdt and
+            # must stay in track ticks.)
+            st["tick_hz"] = PL.mdhd_timescale(st["init"], st["handler"])
         return dict(seq=m["seq"], bytes=seg, dur=dur, samples=m["n_samples"],
                     kept=keep or m["n_samples"],
-                    pid=pid, handler=st["handler"], init=st["init"])
+                    pid=pid, handler=st["handler"], init=st["init"],
+                    tick_hz=st.get("tick_hz"))
 
     def flush(self):
         segs = []
@@ -2301,7 +2316,11 @@ class Player:
         return self.pushed_s - ((now or time.time()) - self.t_play)
 
     def push(self, seg):
-        dur = seg["dur"] / self.timescale
+        # E93: prefer the producer-stamped unit. The constructor default
+        # (90000) is only a fallback for segments that predate the stamp -
+        # on a 240 kHz encoder that fallback satisfies the 5 s prebuffer
+        # with ONE 2 s segment and blinds the underrun detector.
+        dur = seg["dur"] / float(seg.get("tick_hz") or self.timescale)
         self.media_s += dur
         if not self.started:
             self.hold.append(seg)

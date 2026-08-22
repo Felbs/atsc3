@@ -135,7 +135,11 @@ def parse_senc(seg, iv_size=16):
 def picture_stats(mp4):
     cmd = ["ffmpeg", "-v", "error", "-i", mp4, "-frames:v", str(NFRAMES),
            "-pix_fmt", "gray", "-f", "rawvideo", "-"]
-    p = subprocess.run(cmd, capture_output=True, timeout=300)
+    try:
+        p = subprocess.run(cmd, capture_output=True,
+                           timeout=300)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        p = subprocess.CompletedProcess(cmd, -1, e.stdout or b"", e.stderr or b"")
     raw = p.stdout
     n = len(raw) // (W * H)
     if n < 2:

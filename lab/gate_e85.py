@@ -75,8 +75,11 @@ def run_ldm(tag, procs, frames=80, warmup=20, extra=()):
            "--dump-dg", dg, "--json", js] + list(extra)
     env = dict(os.environ, M9_NO_TORCH="1")
     t = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
-                       env=env)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                           env=env)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        p = subprocess.CompletedProcess(cmd, -1, e.stdout or "", e.stderr or "")
     d = json.load(open(js)) if os.path.exists(js) else {}
     d["_wall"] = time.time() - t
     d["_dg"] = dg
@@ -257,7 +260,11 @@ def gate_rf33(baseline_sha, frames=24):
            "--rate", "6912000", "--accel", "cpu", "--frames", str(frames),
            "--player", "none", "--assets", "all", "--threads", "4",
            "--fe-threads", "4", "--decode-procs", "2", "--dump-dg", out]
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=900)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        p = subprocess.CompletedProcess(cmd, -1, e.stdout or "", e.stderr or "")
     got = sha(out) if os.path.exists(out) else None
     fec = [l for l in p.stdout.splitlines() if "FEC Blocks" in l]
     leg("RF33 datagram stream unchanged by E85", got == baseline_sha,

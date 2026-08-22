@@ -88,6 +88,9 @@ RADIO_YIELD_PAT = ("radio held by", "not seizing", "REFUSING: inside")
 
 FADE_FEC = 20.0            # 1-min FEC mean under this = the air is gone
 FADE_MAX_S = 1800.0        # patience bound: probe once per 30 min anyway
+LDM_STARTUP = 90.0         # LDM cold start (prewarm+acquire+lock+1st seg)
+#                            runs ~50-60 s to first byte -- the flat 45 s
+#                            grace was too short (RF25/RF30 false-struck)
 
 # E73: "the air is gone" and "we are overloaded" look IDENTICAL from
 # inside -- both are 0% FEC with frames still advancing, and the fade
@@ -169,6 +172,30 @@ def chain_log_size(live_dir):
         return os.path.getsize(os.path.join(live_dir, "chain.log"))
     except OSError:
         return 0
+
+
+def ldm_cold_start(live_dir, since_off=0):
+    """True once this run's chain has committed to the LDM path.
+
+    The LDM decoder prewarms 189 frequency-interleaver sequences and the
+    64K LDPC tables BEFORE the clock (measured ~22 s), and only then
+    bootstraps, phase-locks and writes its first segment -- a cold start
+    that ran ~50-60 s to first byte on RF25/RF30, past the flat 45 s
+    startup grace, so the supervisor logged 'no heartbeat yet' and burned
+    self-heal grace on a chain that was healthy and still warming up. The
+    chain announces the LDM plan as soon as it is chosen (well before the
+    prewarm finishes), so detecting it lets the startup grace stretch to
+    cover the prewarm without slowing the fast, non-LDM carriers at all.
+    """
+    p = os.path.join(live_dir, "chain.log")
+    try:
+        with open(p, "rb") as f:
+            f.seek(since_off)
+            txt = f.read(400_000).decode("utf-8", "replace")
+    except OSError:
+        return False
+    return ("LDM plan adopted" in txt or "LDM decoder prewarmed" in txt
+            or "LDM demod pool" in txt)
 
 
 def radio_yield_reason(live_dir, rc, since_off=0):
@@ -311,7 +338,7 @@ def find_python(explicit=None):
             continue
         try:
             r = subprocess.run([c, "-c", "import SoapySDR"],
-                               capture_output=True, timeout=60)
+                               capture_output=True, timeout=60)  # pipe-ok: import probe
             if r.returncode == 0:
                 return c
         except (OSError, subprocess.SubprocessError):
@@ -427,8 +454,14 @@ def main():
                     continue
                 if died:
                     log(f"  chain EXITED (rc={proc.returncode})")
-                elif time.time() - started < a.startup:
-                    continue                      # still acquiring; not a wedge
+                elif time.time() - started < max(
+                        a.startup,
+                        LDM_STARTUP if ldm_cold_start(a.live_dir, log_off)
+                        else 0.0):
+                    # still acquiring; not a wedge. The LDM path gets a
+                    # longer grace once it announces its plan -- its cold
+                    # start legitimately outruns the flat 45 s window.
+                    continue
                 else:
                     h = read_health(a.live_dir)
                     if h is None:

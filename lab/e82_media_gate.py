@@ -170,6 +170,21 @@ def main():
               f"{ln['media_s']:8.3f} s  handler {ln['handler']}")
         rep["lanes"][name] = dict(ln)
 
+    # E93's permanent invariant: a live receiver cannot bank media faster
+    # than wall time. foxlive reported 2.6x wall for a month and nothing
+    # checked; this one comparison would have caught it the first night,
+    # and catches the NEXT encoder whose timescale isn't what we assumed.
+    wall = float(meta.get("updated", 0) or 0) - float(meta.get("started", 0) or 0)
+    if wall > 0 and meta.get("lanes"):
+        worst = max(ln.get("media_s", 0.0) for ln in meta["lanes"].values())
+        ok = worst <= wall * 1.02            # 2% grace for rounding
+        verdict = "OK" if ok else \
+            "VIOLATED - the accounting is lying (E93 read 2.667x here)"
+        rep["controls"]["media_le_wall"] = dict(
+            wall_s=round(wall, 1), worst_lane_media_s=round(worst, 1), ok=ok)
+        print(f"\n  MEDIA<=WALL INVARIANT (E93): wall {wall:.0f} s, "
+              f"worst lane {worst:.0f} s -> {verdict}")
+
     print("\n  PICTURE GATE (E67's law, E76's band: flat_frac < %.2f is a "
           "DISCRIMINATOR)" % FLAT_MAX)
     print("    %-42s %-11s %8s %8s %8s %8s" %

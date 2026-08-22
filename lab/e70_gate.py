@@ -471,7 +471,8 @@ def _ffprobe(mp4):
         p = subprocess.run(
             ["ffprobe", "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=codec_name,width,height",
-             "-of", "json", mp4], capture_output=True, timeout=120)
+             "-of", "json", mp4], capture_output=True,
+            timeout=120)  # pipe-ok: fast local ffprobe, timeout is a guard
         j = json.loads(p.stdout or b"{}")
         s = (j.get("streams") or [{}])[0]
         return {"codec": s.get("codec_name"),

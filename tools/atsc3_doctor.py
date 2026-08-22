@@ -253,7 +253,7 @@ def check_blas() -> None:
         try:
             r = subprocess.run([sys.executable, "-c", TINY_MATMUL],
                                capture_output=True, text=True, env=env,
-                               timeout=180)
+                               timeout=180)  # pipe-ok: sub-second matmul, timeout is a guard
             return float(r.stdout.strip()) if r.returncode == 0 else None
         except Exception:
             return None
@@ -318,7 +318,7 @@ def _vlc_help(exe: str) -> str | None:
                  ["--longhelp", "--advanced"], ["--longhelp"], ["-H"]):
         try:
             r = subprocess.run([exe] + args, capture_output=True, text=True,
-                               timeout=60)
+                               timeout=60)  # pipe-ok: --longhelp probe, output is small
             blob = (r.stdout or "") + (r.stderr or "")
             if len(blob) > 2000:
                 return blob

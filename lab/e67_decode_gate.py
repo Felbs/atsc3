@@ -198,7 +198,11 @@ def nal_tiling(seg):
 
 
 def run(cmd):
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=180)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        return -1, e.stdout or "", (e.stderr or "") + "\n[timeout 180s]"
     return p.returncode, p.stdout, p.stderr
 
 

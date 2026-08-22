@@ -8,10 +8,9 @@ failures by name:
 python tools/atsc3_doctor.py
 ```
 
-> **`--rf N` is required when tuning a radio.** There is no default channel; a
-> shipped default would be wrong for everyone but the person who shipped it.
-> Find your local NextGen TV (ATSC 3.0) channel with a channel scan or a
-> coverage map first. Replaying a file with `--capture` needs no `--rf`.
+> **`--rf N` is required.** There is no default channel; a shipped default would
+> be wrong for everyone but the person who shipped it. Find your local NextGen TV
+> (ATSC 3.0) channel with a channel scan or a coverage map first.
 
 ---
 
@@ -36,16 +35,34 @@ Common options:
 | `--player-args "…"` | pass extra arguments through to the player |
 | `--rfgain N` / `--ifgr N` | set SDR RF gain / IF gain reduction (per-site; tune for your antenna) |
 | `--ant NAME` | choose the SDR antenna port |
-| `--json OUT.json` | write the full run telemetry as JSON |
-| `--report N` | progress-line interval in seconds (default 5) |
-| `--live-dir DIR` | where the media lanes are written (video/audio/subtitle tracks) |
+| `--report OUT.json` *(alias `--json`)* | write the full run telemetry as JSON |
 
 Example — record 5 minutes headless, keep the telemetry:
 
 ```
 python -m atsc3 watch --rf N --secs 300 --player none \
-    --record tonight.mp4 --json tonight.json
+    --record tonight.mp4 --report tonight.json
 ```
+
+### One command for the couch: picture + 5.1 sound + captions
+
+```
+python tools/atsc3_watch_av.py --rf N --ant PORT --cc
+```
+
+This starts the chain, decodes **both** audio programs with the AC-4 decoder
+(the main as full 5.1, the second as stereo), and opens an `ffplay` window fed
+by `tools/atsc3_tv.py` — the broadcast HEVC is passed through untouched, the
+5.1 travels as AC-3, captions ride as a soft subtitle track. Closing the window
+stops everything. In the window: **`t`** toggles captions, **`a`** switches
+audio programs. `--lang spa` opens on the second program; `--stereo` downmixes
+the main (centre channel included) for a slower machine.
+
+Every 6 s chunk is logged to `<live-dir>/_tv/telemetry.jsonl` (mux time,
+audio frame carry, player queue depth and write latency, stalls, drops) and a
+one-line digest prints every 10 chunks — if the picture ever hitches, the
+reason is in that file. A player that stops reading is respawned at the live
+edge rather than allowed to stall the decoder.
 
 ---
 
@@ -54,7 +71,10 @@ python -m atsc3 watch --rf N --secs 300 --player none \
 NextGen TV multiplexes can carry more than one audio program — commonly a
 primary language and a second (e.g. Spanish). The receiver decodes both with its
 own AC-4 decoder and offers them as **selectable audio tracks in the player** —
-switch tracks the same way you would for any multi-audio file. Both are muxed
+switch tracks the same way you would for any multi-audio file (`a` in the
+`atsc3_watch_av` window). The second program is whatever the station puts
+there: on one carrier we measured it as a dual-mono feed of the main's centre
+channel (same announcers, no crowd) despite a Spanish language tag. Both are muxed
 into `--record` output, so a recording keeps every language.
 
 ---
@@ -63,7 +83,8 @@ into `--record` output, so a recording keeps every language.
 
 Closed captions (IMSC1 / TTML) are decoded and muxed as a **real, toggleable
 subtitle track**, time-aligned to the picture — not burned into it. Toggle them
-with your player's subtitle control; in a recording they remain a separate track
+with your player's subtitle control (`t` in the `atsc3_watch_av` window); in a
+recording they remain a separate track
 you can enable or disable later.
 
 ---
@@ -139,29 +160,13 @@ identical to a live decode of the same air.
 The gate re-decodes the same signal through an independent offline path and
 checks the streaming receiver against it — the receiver's own honesty test:
 
-The gate runs on a **capture**, not on live air — both paths have to decode the
-same samples for the comparison to mean anything. Record one first:
-
 ```
-python tools/atsc3_capture.py --rf N --secs 12 --out signal.cs16
-python -m atsc3 gate --capture signal.cs16 --rate 6912000
+python -m atsc3 gate --rf N
 ```
 
-`atsc3_capture.py` refuses to bank a clipped or short capture (`VERDICT: VOID`)
-— if it says so, add attenuation with `--rfgain`/`--ifgr` and record again.
-
-The leg that matters is **`end_to_end`**: it passes only when the streaming
-receiver's IP datagrams are **byte-identical** (matching SHA-256) to the
-reference batch decode of the same samples. That is what separates a picture
-that is *correct* from one that merely *looks* correct.
-
-> **Known issue — `resampler_8` / `resampler_10` may FAIL.** These legs assert
-> that the blocked resampler is *bit*-identical to `scipy.signal.resample_poly`
-> over a synthetic signal, and some SciPy builds round the last bit differently
-> (observed: ~1.2e-06 max delta on SciPy 1.15.2, about 10 float32 ULP). It does
-> not affect decoding — `end_to_end` still reports identical datagrams. The
-> check is deliberately left strict rather than loosened to hide the
-> difference.
+A pass means the live streaming path produced **byte-identical** output (matching
+SHA-256) to the reference batch decode. This is the check that separates a
+picture that is *correct* from one that merely *looks* correct.
 
 ---
 

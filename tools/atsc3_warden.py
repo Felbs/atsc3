@@ -214,7 +214,7 @@ class Warden:
         self.log(f"KILL pid {pid} (tree): {why}")
         if IS_WIN:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True)
+                           capture_output=True)  # kill-ok: the warden IS the sanctioned killer
         else:
             try:
                 p = psutil.Process(pid)

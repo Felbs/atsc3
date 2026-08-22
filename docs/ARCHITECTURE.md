@@ -368,17 +368,18 @@ amount of the work.
 
 ```mermaid
 flowchart TD
-    LANES["<b>fMP4 lanes</b> + live.json + per-lane .idx"]
-    LANES --> AUD["<b>AC-4 audio workers</b> &mdash; our own decoder<br/><i>tools/atsc3_audio.py</i><br/>eng: pid13, element 5_X &middot; spa: pid14, element pair<br/>live renders the stereo pair (1.27x);<br/>--channels 6 is discrete-verified but 0.62x<br/>--start-behind 150 s: a live viewer needs<br/>sound NEAR NOW, not from the backlog"]
-    LANES --> SUBS["<b>captions worker</b><br/>stpp / IMSC1 TTML &rarr; srt<br/>+ an EXACT anchor slot in a sidecar"]
-    LANES --> MUX["<b>per-chunk MPEG-TS mux</b><br/>3 slots = 6.006 s per chunk<br/>HEVC copied, never re-encoded<br/>mp2 frame-grid CARRY (E48)<br/>stale-sub PTS filter (E45)"]
-    AUD --> MUX
-    SUBS --> MUX
-    MUX --> TS["<b>growing .ts sink</b><br/>MPEG-TS is byte-concatenable BY DESIGN<br/>&mdash; it is what the air itself uses"]
-    TS --> VLC["<b>VLC tails the file</b><br/>audio track eng/spa &middot; caption toggle<br/><i>VLC cannot read a piped TS on this box</i>"]
-    VLC --> GOV["<b>LeadGovernor</b><br/>delay the window until 24 s of media exists;<br/>when the lead falls to the safety margin,<br/>BUFFER instead of appending, then burst-flush"]
-    VLC --> GUARD["<b>RespawnGuard</b><br/>boot grace 25 s &middot; cooldown 30 s<br/>rewind needs consecutive confirmation<br/>stopped() and frozen-playhead both count (E46)"]
-    VLC --> TRIM["<b>ClockTrim servo</b> (E50)<br/>least-squares cushion slope &rarr; ppm rate trim<br/><i>watchdogs for faults, SERVOS for clocks</i>"]
+    ORCH["<b>ONE COMMAND</b> &mdash; <i>tools/atsc3_watch_av.py --rf N [--lang spa] [--cc]</i><br/>wires the workers below, cleans stale lanes FIRST,<br/>tears the whole tree down when the window closes"]
+    ORCH --> CHAIN["<b>chain</b> &mdash; <i>atsc3_run --assets all</i><br/>owns the single-tenant radio<br/>&rarr; video + audio(pid13/14) + caption(pid15) lanes"]
+    CHAIN --> LANES["<b>fMP4 lanes</b> + live.json + per-lane .idx<br/>every lane shares first_seq = ONE media origin"]
+    LANES --> AUD["<b>AC-4 audio worker</b> &mdash; our decoder<br/><i>tools/atsc3_audio.py</i> &rarr; live_audio.wav<br/>eng pid13 element 5_X &middot; spa pid14 element pair<br/>stereo pair keeps up live (1.27x); 6ch is 0.62x"]
+    LANES --> SUBS["<b>caption worker</b><br/><i>tools/atsc3_subs.py</i> &mdash; TTML &rarr; growing live.srt<br/>+ an EXACT anchor slot in a sidecar"]
+    LANES --> TV
+    AUD --> TV
+    SUBS --> TV
+    TV["<b>tools/atsc3_tv.py &mdash; THE MUX. A/V SYNC LIVES HERE, NOWHERE ELSE.</b><br/>per-chunk MPEG-TS (3 slots = 6.006 s), HEVC copied<br/>per-input <i>-itsoffset</i> + tfdt so every stream shares t=0<br/>ClockTrim servo (E50) &middot; LeadGovernor &middot; RespawnGuard<br/>mp2 frame-grid CARRY (E48) &middot; stale-sub PTS filter (E45)"]
+    TV -->|"--mode v2"| VLC["<b>VLC tails the growing .ts file</b><br/>soft subs + eng/spa audio-track menu<br/><i>VLC cannot read a pipe on this box</i>"]
+    TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied, soft DVB captions ('t' toggles), eng/spa ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
+    TV -->|"--mode v1"| FF1["<b>ffplay on a pipe, captions BURNED</b><br/>re-encodes every chunk (x264) = fidelity loss<br/>kept as the validated fallback only"]
 ```
 
 Two design rules carry most of the weight here:
@@ -390,6 +391,40 @@ freeze.
 **A missing second language must never fail the chunk.** Spanish is not waited
 on; English is, but only for a bounded 75 s, after which the chunk goes out
 with silence rather than freezing the picture.
+
+**LAW &mdash; do not hand-roll the mux.** `atsc3_tv.py` is the ONE place A/V
+sync lives. A 2026-08-22 detour fed raw PCM (no timestamps) into a private
+ffmpeg with no clock servo: the audio slid seconds behind the video (a
+commercial on screen, the football on the speakers), and the captions floated
+in a monitor-centred window instead of over the picture. The fix was not to
+patch that pipeline but to DELETE it and route every viewer through
+`atsc3_tv.py` (`--mode v2 --player ffplay` on the desktop, `--mode v2` VLC
+where VLC exists, `--mode v1` only as the burned-caption fallback). If a new
+front-end needs a window, it feeds `atsc3_tv.py`; it does not re-implement the
+chunk mux, the `-itsoffset` alignment, or the ClockTrim servo. Reinventing
+those is how this breaks over and over.
+
+Three seam laws learned 8/22 (E95/E96/E97), all in `atsc3_tv.py`:
+
+* **Never burn captions to get them on screen.** Burning forces a re-encode
+  of every chunk; the broadcast HEVC must reach the player untouched. Soft
+  DVB subtitles render in ffplay and VLC alike.
+* **A chunk seam must be invisible in three clocks at once**: timestamps
+  (the `-itsoffset`/tfdt arithmetic), the audio sample grid (the E48 mp2
+  carry -- 6.006 s is 250.25 frames, so chunks go 250/250/250/251), and the
+  TS continuity counters (`TsStitch`). Any one of them wrong = a hitch
+  every 6 s that looks like "the signal".
+* **Ship the centre channel.** The live path once decoded L/R only and
+  called it stereo: the centre -- dialogue, 4 dB hotter than L/R on air --
+  was dropped (E98). The 5.1 main now rides as AC-3 640k (the TS-native
+  5.1 codec, 1.87x realtime from our decoder on the desktop), the SAP as
+  mp2, both decoded by their own worker; the frame grid becomes
+  lcm(1152, 1536) = 4608 so AC-3 and mp2 butt-join together. A stereo
+  output still gets the centre, because the player's downmix includes it.
+* **The player is an output.** The muxer feeds it through `PipeFeed` and
+  never blocks on it; a stall is logged to `_tv/telemetry.jsonl` and the
+  player is respawned at the live edge (stampede-gated). When the user
+  says "it skips" or "it froze", read the telemetry before theorising.
 
 ---
 

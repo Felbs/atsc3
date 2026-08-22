@@ -221,6 +221,12 @@ class Session:
             self.anchor_seq = self.subs_seq0
         self.eng = AudioTrack(live_dir, "live_audio.json")
         self.spa = AudioTrack(live_dir, "live_audio_spa.json")
+        self.eng_ch = 2
+        if self.eng.path:
+            try:
+                self.eng_ch = wave.open(self.eng.path).getnchannels()
+            except Exception:                                  # noqa: BLE001
+                pass
 
     def ok(self):
         return self.vid is not None
@@ -239,10 +245,13 @@ def _downmix(seg):
     return np.clip(out, -32768, 32767).astype("<i2")
 
 
-def audio_slice(sess, live_dir, s_lo, s_hi, track):
-    """Stereo int16 PCM for slots [s_lo, s_hi): slot-aligned, silence where
+def audio_slice(sess, live_dir, s_lo, s_hi, track, want_ch=2):
+    """int16 PCM for slots [s_lo, s_hi): slot-aligned, silence where
     the wav (or the whole track) is absent -- a missing second language
-    must never fail the chunk.
+    must never fail the chunk. want_ch=2 downmixes a 5.1 wav (ITU, centre
+    folded in); want_ch=6 returns the 5.1 untouched when the wav has it
+    (E98: the live path used to ship L/R ONLY -- the centre channel, where
+    the dialogue sits 4 dB hotter than L/R, was simply dropped).
 
     ANCHORED MAPPING (E35 addendum): the workers now support
     --start-behind, so wav sample 0 belongs to the sidecar's first_seq
@@ -256,7 +265,7 @@ def audio_slice(sess, live_dir, s_lo, s_hi, track):
     until the worker restarts (sidecars carry no generation field yet)."""
     import numpy as np
     n_slots = s_hi - s_lo
-    out = np.zeros((n_slots * SPF, 2), "<i2")
+    out = np.zeros((n_slots * SPF, want_ch), "<i2")
     if track.path is None or track.first is None:
         return out
     lane = next((l for l in sess.lanes.values()
@@ -298,10 +307,12 @@ def audio_slice(sess, live_dir, s_lo, s_hi, track):
             seg = np.frombuffer(w.readframes(SPF), "<i2").reshape(-1, nch)
             if len(seg) != SPF:
                 continue
-            if nch == 2:
+            if nch == want_ch:
                 out[i * SPF:(i + 1) * SPF] = seg
-            elif nch == 6:
+            elif nch == 6 and want_ch == 2:
                 out[i * SPF:(i + 1) * SPF] = _downmix(seg)
+            elif nch == 2 and want_ch == 6:
+                out[i * SPF:(i + 1) * SPF, :2] = seg      # L/R, rest silent
         w.close()
     except Exception as e:                                     # noqa: BLE001
         # NEVER a silent swallow: an exception here writes SILENCE into
@@ -406,16 +417,23 @@ def srt_stamp(t):
     return f"{int(h):02d}:{int(m):02d}:{int(r):02d},{int((r % 1) * 1000):03d}"
 
 
-def chunk_srt(cues, lo_t, hi_t, path):
-    """Cues intersecting [lo_t, hi_t) rebased to the chunk. -> count."""
+def chunk_srt(cues, lo_t, hi_t, path, base=0.0):
+    """Cues intersecting [lo_t, hi_t) rebased to the chunk, then placed on
+    the clock the burn filter will see (chunk start = base). -> count.
+
+    E95 (8/22): ffmpeg's subtitles filter matches cues against the video's
+    pts AFTER -itsoffset, and the v1 mux puts each chunk's first slot at
+    t_off -- a clock that grows by one chunk per chunk. Cues written at 0
+    matched only the very first chunk (t_off=0); every later chunk burned
+    nothing ("captions worked at launch, then stopped")."""
     n = 0
     with open(path, "w", encoding="utf-8") as f:
         for b, e, txt in cues:
             if e <= lo_t or b >= hi_t:
                 continue
             n += 1
-            f.write(f"{n}\n{srt_stamp(b - lo_t)} --> "
-                    f"{srt_stamp(min(e, hi_t) - lo_t)}\n{txt}\n\n")
+            f.write(f"{n}\n{srt_stamp(b - lo_t + base)} --> "
+                    f"{srt_stamp(min(e, hi_t) - lo_t + base)}\n{txt}\n\n")
     return n
 
 
@@ -1038,9 +1056,10 @@ def write_wav(path, pcm):
 
 
 MP2_SPF = 1152                    # samples per mp2 frame at 48 kHz
+AC3_SPF = 1536                    # AC-3 frame; 4 mp2 frames = 3 ac3 frames
 
 
-def frame_align(pcm_e, pcm_s, carry):
+def frame_align(pcm_e, pcm_s, carry, grid=MP2_SPF):
     """Align this chunk's audio to the mp2 FRAME GRID via a carry.
 
     E48 (8/08, measured): a chunk span is 288288 samples = 250.25 mp2
@@ -1064,7 +1083,11 @@ def frame_align(pcm_e, pcm_s, carry):
     if lead:
         pcm_e = np.vstack([carry["eng"], pcm_e])
         pcm_s = np.vstack([carry["spa"], pcm_s])
-    keep = (len(pcm_e) // MP2_SPF) * MP2_SPF
+    # E98: with an AC-3 main the grid is lcm(1152, 1536) = 4608 samples
+    # (3 AC-3 frames = 4 mp2 frames), so BOTH encoders butt-join; a 1152
+    # grid would leave AC-3 half a frame of padding at every seam -- the
+    # E48 overlap back again, 16 ms per chunk.
+    keep = (len(pcm_e) // grid) * grid
     carry["eng"], carry["spa"] = pcm_e[keep:].copy(), pcm_s[keep:].copy()
     return pcm_e[:keep], pcm_s[:keep], lead
 
@@ -1084,11 +1107,22 @@ def mux_chunk_v2(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
     frags, tfdt0 = write_chunk_video(sess, frags, vm)  # corrupt frags dropped
     ae = os.path.join(tmp_dir, "chunk_eng.wav")
     asp = os.path.join(tmp_dir, "chunk_spa.wav")
-    pcm_e = audio_slice(sess, live_dir, s_lo, s_hi, sess.eng)
+    eng_ch = 6 if (sess.eng_ch == 6 and not getattr(sess, "stereo_only",
+                                                       False)) else 2
+    pcm_e = audio_slice(sess, live_dir, s_lo, s_hi, sess.eng, want_ch=eng_ch)
     pcm_s = audio_slice(sess, live_dir, s_lo, s_hi, sess.spa)
     a_lead = 0
     if carry is not None:
-        pcm_e, pcm_s, a_lead = frame_align(pcm_e, pcm_s, carry)
+        if carry["eng"] is not None and carry["eng"].shape[1] != eng_ch:
+            carry["eng"] = carry["spa"] = None     # layout changed: restart
+        pcm_e, pcm_s, a_lead = frame_align(
+            pcm_e, pcm_s, carry, grid=(4608 if eng_ch == 6 else MP2_SPF))
+    # E98: a 5.1 main goes out as AC-3 640k (the TS-native 5.1 codec;
+    # ffplay/VLC decode it and downmix WITH the centre on stereo outputs).
+    # mp2 is a 2-channel codec and cannot carry it. Both codecs use 1536
+    # samples per frame at 48 kHz, so the E48 carry arithmetic is identical.
+    eng_codec = ["-c:a:0", "ac3", "-b:a:0", "640k"] if eng_ch == 6 else \
+        ["-c:a:0", "mp2", "-b:a:0", "224k"]
     a_off = t_off - a_lead / 48000.0
     write_wav(ae, pcm_e)
     write_wav(asp, pcm_s)
@@ -1125,8 +1159,8 @@ def mux_chunk_v2(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
          # -itsoffset here, the sup carries absolute times (see above)
          "-fix_sub_duration", "-i", sup,
          "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:s",
-         "-c:v", "copy",
-         "-c:a", "mp2", "-b:a", "224k",
+         "-c:v", "copy"] + eng_codec +
+        ["-c:a:1", "mp2", "-b:a:1", "224k",
          "-c:s", "dvbsub",
          "-metadata:s:a:0", "language=eng",
          "-metadata:s:a:1", "language=spa",
@@ -1150,15 +1184,27 @@ def mux_chunk_v2(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
 
 
 def mux_chunk_v1(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
-                 lane_seq0=None, cues=None):
-    """The validated v1 path (burned captions, single audio), unchanged.
+                 lane_seq0=None, cues=None, carry=None):
+    """The validated v1 path (burned captions, single audio).
 
-    Kept as --mode v1: the fallback must stay real (fleet law)."""
+    Kept as --mode v1: the fallback must stay real (fleet law).
+    E96 (8/22): v1 never received the E48 mp2 frame-grid carry, so every
+    chunk shipped 251 frames (6.024 s) of audio in a 6.006 s slot -- 18 ms
+    of double audio at each boundary, and ffplay (audio-master) dropped a
+    60 fps frame every chunk: the "it skips every once in a while" report
+    while A/V sync itself looked fine. Same invariant as v2, same cure."""
     tmp_dir = os.path.abspath(tmp_dir)
     vm = os.path.join(tmp_dir, "chunk.m4s")
     frags, tfdt0 = write_chunk_video(sess, frags, vm)  # corrupt frags dropped
     aw = os.path.join(tmp_dir, "chunk.wav")
     pcm = audio_slice(sess, live_dir, s_lo, s_hi, sess.eng)
+    a_lead = 0
+    if carry is not None:
+        import numpy as np
+        # frame_align is two-track; v1 carries one, so feed it a matching
+        # silent second track (the spa carry is thrown away with it)
+        pcm, _, a_lead = frame_align(pcm, np.zeros_like(pcm), carry)
+    a_off = t_off - a_lead / 48000.0
     write_wav(aw, pcm)
     lane_t = lane_time(sess, frags, lane_seq0, tfdt0)   # E71: measured
     v_extra = (frags[0][0] - s_lo) * MPU_SECONDS if frags else 0.0
@@ -1168,12 +1214,20 @@ def mux_chunk_v1(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
         # CAPTIONS ARE BURNED, and therefore EVERY chunk re-encodes -- a TS
         # that alternates copied HEVC with encoded H.264 changes codec
         # mid-stream and players give up. Uniformity is the contract.
-        # (v1 keeps its historical subs-worker-starts-at-lane-0 assumption.)
-        sub_shift = ((lane_seq0 - sess.subs_seq0) * MPU_SECONDS
-                     if sess.subs_seq0 is not None else 0.0)
+        # srt t=0 is the subs worker's anchor slot (E35 sidecar, exact;
+        # subs-lane first_seq is the fallback -- sess.anchor_seq already
+        # resolves that order).
+        seq0 = sess.anchor_seq if sess.anchor_seq is not None \
+            else sess.subs_seq0
+        sub_shift = ((lane_seq0 - seq0) * MPU_SECONDS
+                     if seq0 is not None else 0.0)
         lo_t = (s_lo - lane_seq0) * MPU_SECONDS + sub_shift
         hi_t = (s_hi - lane_seq0) * MPU_SECONDS + sub_shift
-        n = chunk_srt(cues, lo_t, hi_t, os.path.join(tmp_dir, "chunk.srt"))
+        # The video's tfdt is cancelled by -lane_t below, so slot s_lo sits
+        # at pts t_off inside ffmpeg -- write the cues on THAT clock (E95:
+        # cues at 0 matched only the first chunk, then captions vanished).
+        n = chunk_srt(cues, lo_t, hi_t, os.path.join(tmp_dir, "chunk.srt"),
+                      base=t_off)
         vargs = list(video_encoder())
         if n:
             # ffmpeg runs with cwd=tmp_dir so the subtitles filter can name
@@ -1182,7 +1236,7 @@ def mux_chunk_v1(sess, live_dir, frags, s_lo, s_hi, t_off, tmp_dir,
     r = subprocess.run(
         [ffbin("ffmpeg"), "-loglevel", "error",
          "-itsoffset", f"{t_off + v_extra - lane_t:.6f}", "-i", vm,
-         "-itsoffset", f"{t_off:.6f}", "-i", aw,
+         "-itsoffset", f"{a_off:.6f}", "-i", aw,
          "-map", "0:v", "-map", "1:a"] + vf + vargs +
         ["-c:a", "mp2", "-b:a", "224k",
          "-muxdelay", "0", "-muxpreload", "0",
@@ -1374,12 +1428,208 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
                             start_new_session=not IS_WIN)
 
 
-def spawn_ffplay(title):
+def spawn_ffplay(title, extra=()):
     return subprocess.Popen(
         [ffbin("ffplay"), "-hide_banner", "-loglevel", "error", "-nostats",
-         "-window_title", title, "-i", "pipe:0"],
+         "-window_title", title] + list(extra) + ["-i", "pipe:0"],
         stdin=subprocess.PIPE, env=display_env(),
         start_new_session=not IS_WIN)
+
+
+class TsStitch:
+    """Make a concatenation of independently muxed TS chunks ONE stream.
+
+    E97 (8/22, measured): every chunk is its own ffmpeg run, so each one
+    restarts the 4-bit continuity counter of every PID at 0. Parsed the
+    v2 TS: 48/48 seams broke continuity on ALL seven PIDs while every
+    timestamp was contiguous (0 audio gaps, 0 video dts jumps). ffplay's
+    demuxer flagged the first video packet of every chunk "Packet corrupt"
+    -- one damaged frame every 6.006 s, on top of whatever else the
+    player does at a seam. Rewriting the counters across chunks costs ~1 ms
+    of numpy per chunk and leaves the bytes otherwise untouched."""
+    def __init__(self):
+        self.last = {}
+
+    def reset(self):
+        self.last = {}
+
+    def __call__(self, ts):
+        import numpy as np
+        n = len(ts) // 188
+        if n == 0:
+            return ts
+        a = np.frombuffer(ts, "u1")[:n * 188].reshape(n, 188).copy()
+        pid = ((a[:, 1].astype(np.int32) & 0x1f) << 8) | a[:, 2]
+        afc = (a[:, 3] >> 4) & 3
+        counted = (afc == 1) | (afc == 3)           # payload present
+        counted &= (pid != 0x1fff)
+        for p in np.unique(pid[counted]):
+            rows = np.nonzero((pid == p) & counted)[0]
+            start = (self.last.get(int(p), -1) + 1) & 0xf
+            cc = (start + np.arange(len(rows))) & 0xf
+            a[rows, 3] = (a[rows, 3] & 0xf0) | cc.astype("u1")
+            self.last[int(p)] = int(cc[-1])
+        return a.tobytes() + ts[n * 188:]
+
+
+class PipeFeed:
+    """Feed a player's stdin WITHOUT ever blocking the muxer.
+
+    The freeze of 15:12 (8/22): ffplay stopped reading its pipe (0.00 s
+    CPU -- paused or wedged), the muxer blocked in sink.write() with the
+    pipe full, and the whole viewer stood still with nothing logged. The
+    player is an OUTPUT: its stall must become an EVENT (telemetry +
+    respawn), never a wedge. write() enqueues and returns; a thread does
+    the blocking writes; stalled() reports how long the player has refused
+    bytes; a full queue drops the OLDEST chunk (live edge wins, and the
+    drop is counted)."""
+    def __init__(self, stdin, max_chunks=5):
+        import threading
+        import collections
+        self.q = collections.deque()
+        self.max = max_chunks
+        self.lock = threading.Lock()
+        self.cv = threading.Condition(self.lock)
+        self.stitch = TsStitch()
+        self.dropped = 0
+        self.written = 0
+        self.busy_since = None        # wall time the current write began
+        self.last_ok = time.time()
+        self.write_ms_last = 0.0
+        self.closed = False
+        self.err = None
+        self.f = None
+        self.attach(stdin)
+
+    def attach(self, stdin):
+        import threading
+        with self.lock:
+            self.f = stdin
+            self.closed = False
+            self.err = None
+            self.busy_since = None
+            self.last_ok = time.time()
+            self.q.clear()
+            self.stitch.reset()
+        self.t = threading.Thread(target=self._run, args=(stdin,),
+                                  daemon=True)
+        self.t.start()
+
+    def write(self, b):
+        if not b:
+            return
+        with self.cv:
+            self.q.append(self.stitch(b))
+            while len(self.q) > self.max:
+                self.q.popleft()
+                self.dropped += 1
+            self.cv.notify()
+
+    def flush(self):
+        pass
+
+    def depth(self):
+        with self.lock:
+            return len(self.q)
+
+    def stalled(self):
+        """Seconds the player has been refusing bytes (0 when healthy)."""
+        with self.lock:
+            if self.busy_since is not None:
+                return time.time() - self.busy_since
+            return 0.0
+
+    def _run(self, f):
+        while True:
+            with self.cv:
+                while not self.q and not self.closed and self.f is f:
+                    self.cv.wait(0.5)
+                if self.closed or self.f is not f:
+                    return
+                b = self.q.popleft()
+                self.busy_since = time.time()
+            try:
+                t0 = time.time()
+                f.write(b)
+                f.flush()
+                with self.lock:
+                    self.write_ms_last = (time.time() - t0) * 1000.0
+                    self.written += len(b)
+                    self.busy_since = None
+                    self.last_ok = time.time()
+            except (OSError, ValueError) as e:
+                with self.lock:
+                    self.err = e
+                    self.busy_since = None
+                return
+
+    def close(self):
+        with self.cv:
+            self.closed = True
+            self.cv.notify_all()
+        try:
+            self.f.close()
+        except (OSError, ValueError):
+            pass
+
+
+class Telemetry:
+    """Per-chunk facts to _tv/telemetry.jsonl + a console digest.
+
+    The user's ask (8/22): "better math, telemetry" -- the viewer must be
+    able to SAY why it skipped or froze. One record per chunk: mux time,
+    bytes, the audio frame-grid carry, queue depth, the player's last
+    write latency and stall, drops. The digest every --telemetry-every
+    chunks is the one line a human reads."""
+    def __init__(self, path, every=10):
+        self.path = path
+        self.every = every
+        self.n = 0
+        self.acc = self._zero()
+        try:
+            self.f = open(path, "a", encoding="utf-8")
+        except OSError:
+            self.f = None
+
+    @staticmethod
+    def _zero():
+        return {"mux_ms": 0.0, "write_ms": 0.0, "bytes": 0,
+                "max_stall": 0.0, "max_depth": 0}
+
+    def _emit(self, rec):
+        if self.f is not None:
+            try:
+                self.f.write(json.dumps(rec) + "\n")
+                self.f.flush()
+            except OSError:
+                pass
+
+    def chunk(self, rec):
+        self.n += 1
+        self.acc["mux_ms"] += rec.get("mux_ms", 0.0)
+        self.acc["write_ms"] += rec.get("write_ms", 0.0)
+        self.acc["bytes"] += rec.get("bytes", 0)
+        self.acc["max_stall"] = max(self.acc["max_stall"],
+                                    rec.get("stall_s", 0.0))
+        self.acc["max_depth"] = max(self.acc["max_depth"],
+                                    rec.get("depth", 0))
+        rec["wall"] = round(time.time(), 3)
+        self._emit(rec)
+        if self.n % self.every == 0:
+            k = self.every
+            log(f"  tel: {rec.get('t_off', 0):.0f}s out  "
+                f"mux {self.acc['mux_ms'] / k:.0f} ms/chunk  "
+                f"{self.acc['bytes'] / k / 1e6:.2f} MB/chunk  "
+                f"player write {self.acc['write_ms'] / k:.0f} ms  "
+                f"q<={self.acc['max_depth']}  "
+                f"stall<={self.acc['max_stall']:.1f}s  "
+                f"dropped {rec.get('dropped', 0)}  "
+                f"fails {rec.get('fails', 0)}  "
+                f"lag {rec.get('lag_s', 0):.0f}s")
+            self.acc = self._zero()
+
+    def event(self, kind, **kw):
+        self._emit({"wall": round(time.time(), 3), "event": kind, **kw})
 
 
 # ------------------------------------------------------------------ main
@@ -1436,6 +1686,18 @@ def main():
                     help="pre-E61 behaviour: per-chunk audio-hold even "
                          "when the worker wav is dead (the E42 metronome; "
                          "kept real as the gate's negative control)")
+    ap.add_argument("--stereo", action="store_true",
+                    help="v2: downmix a 5.1 main to stereo mp2 instead of "
+                         "passing it through as AC-3 5.1 (E98)")
+    ap.add_argument("--ffplay-audio", choices=("eng", "spa"), default="eng",
+                    help="v2+ffplay: audio track selected at open (press "
+                         "'a' in the window to cycle, 't' toggles captions)")
+    ap.add_argument("--player-stall", type=float, default=20.0,
+                    help="v2+ffplay: seconds the player may refuse bytes "
+                         "before it is respawned at the live edge (E97)")
+    ap.add_argument("--telemetry-every", type=int, default=10,
+                    help="console digest every N chunks (records go to "
+                         "_tv/telemetry.jsonl every chunk)")
     ap.add_argument("--exit-on-player-close", action="store_true",
                     help="pre-E61 behaviour: a vanished VLC stops the "
                          "viewer. Default now RESPAWNS the player at the "
@@ -1469,11 +1731,30 @@ def main():
             record_player(tmp, pl, player_image("ffplay"))
             sink = pl.stdin
             log("ffplay window opened; muxing begins")
+    elif a.mode == "v2" and a.player == "ffplay":
+        # E97: the v2 mux (HEVC COPY, eng+spa, soft DVB captions) piped
+        # straight into ffplay -- the broadcast picture untouched, captions
+        # rendered by the player ('t' toggles, 'a' cycles audio), and a
+        # feed thread between us so a stalled player can never wedge the
+        # muxer (the 15:12 freeze).
+        def spawn_v2_ffplay():
+            ex = ["-ast", "a:1"] if a.ffplay_audio == "spa" else []
+            if a.subs == "none":
+                ex += ["-sn"]
+            return spawn_ffplay("LIVE 107.1 (atsc3_tv v2/ffplay)", ex)
+        pl = spawn_v2_ffplay()
+        record_player(tmp, pl, player_image("ffplay"))
+        sink = PipeFeed(pl.stdin)
+        log("ffplay window opened (v2: HEVC copy + soft CC); muxing begins")
     else:
         out_ts = a.out or os.path.join(tmp, "live_tv2.ts")
         sink = open(out_ts, "wb")
         log(f"v2 sink: {out_ts}" + ("" if a.player == "none"
                                     else " (VLC follows first chunk)"))
+    tel = Telemetry(os.path.join(tmp, "telemetry.jsonl"),
+                    every=max(1, a.telemetry_every))
+    feed = sink if isinstance(sink, PipeFeed) else None
+    feed_respawns = []
 
     mux = mux_chunk_v2 if a.mode == "v2" else mux_chunk_v1
 
@@ -1507,8 +1788,10 @@ def main():
 
     t_clock = 0.0                 # the shared output clock, only ever grows
     sess = Session(d, t_clock)
+    sess.stereo_only = a.stereo
     if a.mode == "v2":
-        log(f"  eng wav: {'yes' if sess.eng.path else 'NO (silence)'}   "
+        log(f"  eng wav: {'yes' if sess.eng.path else 'NO (silence)'}"
+            f"{' 5.1 -> AC-3' if (sess.eng_ch == 6 and not a.stereo) else ' stereo mp2'}   "
             f"spa wav: {'yes' if sess.spa.path else 'NO (silence)'}   "
             f"cc anchor: "
             f"{'exact' if sess.anchor_exact else 'first_seq fallback'}")
@@ -1526,6 +1809,35 @@ def main():
             if a.max_seconds and time.time() - t_wall0 >= a.max_seconds:
                 log("max-seconds reached -- stopping")
                 return 0
+            if feed is not None and pl is not None and pl.poll() is None \
+                    and feed.stalled() > a.player_stall:
+                # E97: the player has refused bytes for --player-stall s
+                # (paused by a stray key/click, wedged, or a runaway
+                # decode). It is an OUTPUT -- respawn it at the live edge,
+                # cooldown-spaced, with the same stampede gate as VLC.
+                now = time.time()
+                feed_respawns[:] = [t for t in feed_respawns
+                                    if now - t < 3600.0]
+                st = feed.stalled()
+                tel.event("player_stall", stall_s=round(st, 1),
+                          depth=feed.depth(),
+                          respawns_hour=len(feed_respawns))
+                if len(feed_respawns) >= 8:
+                    log(f"  player stalled {st:.0f}s but respawned "
+                        f"{len(feed_respawns)}x this hour -- STANDING DOWN "
+                        f"(window kept; the feed drops the backlog)")
+                else:
+                    log(f"  player stalled {st:.0f}s (q {feed.depth()}) "
+                        f"-- respawning ffplay at the live edge")
+                    kill_tree(pl.pid)
+                    try:
+                        pl.wait(timeout=5)
+                    except Exception:                      # noqa: BLE001
+                        pass
+                    pl = spawn_v2_ffplay()
+                    record_player(tmp, pl, player_image("ffplay"))
+                    feed.attach(pl.stdin)
+                    feed_respawns.append(now)
             if pl is not None and pl.poll() is not None:
                 # E61 (8/10): a VANISHED player process was the uncovered
                 # third state -- E45 covered the wedged player, E46 the
@@ -1672,6 +1984,7 @@ def main():
                 if cursor is None and sess.gen is not None:
                     log(f"  session re-adopted: gen {sess.gen} -> {ns.gen}"
                         f"{else_note}")
+                ns.stereo_only = a.stereo
                 sess = ns
                 cursor = None
                 audio_wait0 = None      # hold state belongs to the old lane
@@ -1749,13 +2062,30 @@ def main():
                 cues = (parse_srt(os.path.join(d, "live.srt"))
                         if a.subs in ("burn", "soft") else
                         ([] if a.mode == "v2" else None))
+                t_mux0 = time.time()
                 ts = mux(sess, d, frags, s_lo, s_hi, t_clock, tmp,
                          lane_seq0=idx[0][0], cues_srt=cues,
                          carry=a_carry) \
                     if a.mode == "v2" else \
                     mux(sess, d, frags, s_lo, s_hi, t_clock, tmp,
                         lane_seq0=idx[0][0],
-                        cues=cues if a.subs == "burn" else None)
+                        cues=cues if a.subs == "burn" else None,
+                        carry=a_carry)
+                tel.chunk({
+                    "slot": s_lo, "t_off": round(t_clock, 3),
+                    "frags": len(frags),
+                    "mux_ms": round((time.time() - t_mux0) * 1000.0, 1),
+                    "bytes": len(ts),
+                    "carry": (len(a_carry["eng"])
+                              if a_carry["eng"] is not None else 0),
+                    "eng_ch": sess.eng_ch,
+                    "depth": feed.depth() if feed else 0,
+                    "write_ms": round(feed.write_ms_last, 1) if feed else 0,
+                    "stall_s": round(feed.stalled(), 2) if feed else 0,
+                    "dropped": feed.dropped if feed else 0,
+                    "fails": n_fail,
+                    "player": (pl.poll() is None) if pl is not None else None,
+                    "lag_s": round((head - s_hi) * MPU_SECONDS, 1)})
                 if ts:
                     out_b = gov.push(ts, a.chunk * MPU_SECONDS,
                                      time.time()) if gov is not None else ts
@@ -1854,6 +2184,8 @@ def main():
         try:
             if a.mode == "v1" and pl is not None:
                 pl.stdin.close()
+            elif isinstance(sink, PipeFeed):
+                sink.close()
             elif sink is not None:
                 sink.close()
         except OSError:

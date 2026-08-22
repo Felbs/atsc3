@@ -36,6 +36,44 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # minimal ISOBMFF
 # ---------------------------------------------------------------------------
 
+def mdhd_timescale(init, handler=None):
+    """moov/trak/mdia/mdhd -> timescale (ticks/s), or None.
+
+    E93: `trun` durations are in the TRACK'S OWN timescale and nothing
+    downstream may assume 90 kHz - foxlive's ATEME encoder muxes at 240000
+    and the assumption over-counted every lane by exactly 8/3. Hardened
+    trak selection, because "first trak" is a latent bug: foxlive's init
+    carries a second `hint` trak (which happens to read 240000 too, today).
+    Prefer the trak whose hdlr matches `handler` (b"vide"/b"soun"/...);
+    otherwise the first non-hint trak with an mdhd.
+    """
+    fallback = None
+    for o, sz, t in boxes(init):
+        if t != b"moov":
+            continue
+        for o2, sz2, t2 in boxes(init, o + 8, o + sz):
+            if t2 != b"trak":
+                continue
+            hd = ts = None
+            for o3, sz3, t3 in boxes(init, o2 + 8, o2 + sz2):
+                if t3 != b"mdia":
+                    continue
+                for o4, sz4, t4 in boxes(init, o3 + 8, o3 + sz3):
+                    if t4 == b"hdlr":
+                        hd = bytes(init[o4 + 16:o4 + 20])
+                    elif t4 == b"mdhd":
+                        ver = init[o4 + 8]
+                        p = o4 + 12 + (16 if ver else 8)
+                        ts = int.from_bytes(init[p:p + 4], "big")
+            if ts is None:
+                continue
+            if handler is not None and hd == handler:
+                return ts
+            if hd != b"hint" and fallback is None:
+                fallback = ts
+    return fallback
+
+
 def boxes(d, start=0, end=None):
     end = len(d) if end is None else end
     o = start

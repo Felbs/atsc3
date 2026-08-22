@@ -430,7 +430,11 @@ def gate_rf33_identity(baseline_sha, frames=24):
            "--player", "none", "--assets", "all", "--threads", "4",
            "--fe-threads", "4", "--decode-procs", "2", "--dump-dg", out]
     t = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=900)  # pipe-ok: TimeoutExpired salvaged below
+    except subprocess.TimeoutExpired as e:  # keep the evidence (7/31 balloon law)
+        p = subprocess.CompletedProcess(cmd, -1, e.stdout or "", e.stderr or "")
     sha = (hashlib.sha256(open(out, "rb").read()).hexdigest()
            if os.path.exists(out) else None)
     fec = [l for l in p.stdout.splitlines() if "FEC Blocks" in l]
