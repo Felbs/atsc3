@@ -376,9 +376,9 @@ flowchart TD
     LANES --> TV
     AUD --> TV
     SUBS --> TV
-    TV["<b>tools/atsc3_tv.py &mdash; THE MUX. A/V SYNC LIVES HERE, NOWHERE ELSE.</b><br/>per-chunk MPEG-TS (3 slots = 6.006 s), HEVC copied<br/>per-input <i>-itsoffset</i> + tfdt so every stream shares t=0<br/>ClockTrim servo (E50) &middot; LeadGovernor &middot; RespawnGuard<br/>mp2 frame-grid CARRY (E48) &middot; stale-sub PTS filter (E45)"]
+    TV["<b>tools/atsc3_tv.py &mdash; THE MUX. A/V SYNC LIVES HERE, NOWHERE ELSE.</b><br/>per-chunk MPEG-TS (3 slots = 6.006 s), HEVC copied<br/>per-input <i>-itsoffset</i> + tfdt so every stream shares t=0<br/>ClockTrim servo (E50) &middot; LeadGovernor &middot; RespawnGuard<br/>audio frame-grid CARRY: lcm(1152,1536)=4608 so mp2 &amp; AC-3 butt-join (E48/E98)<br/>caption cues on the post-itsoffset clock (E95) &middot; stale-sub PTS filter (E45)"]
     TV -->|"--mode v2"| VLC["<b>VLC tails the growing .ts file</b><br/>soft subs + eng/spa audio-track menu<br/><i>VLC cannot read a pipe on this box</i>"]
-    TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied, soft DVB captions ('t' toggles), eng/spa ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
+    TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied &middot; <b>5.1 main as AC-3 640k</b> + 2nd programme mp2 (E98)<br/>soft DVB captions ('t' toggles), audio programmes ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
     TV -->|"--mode v1"| FF1["<b>ffplay on a pipe, captions BURNED</b><br/>re-encodes every chunk (x264) = fidelity loss<br/>kept as the validated fallback only"]
 ```
 

@@ -56,13 +56,13 @@ SoapySDR.SoapySDR_setLogLevel(SoapySDR.SOAPY_SDR_FATAL)
 
 OWNER, PRI = "atsc3_sweep", 50
 RATE = 8e6
-ANT = "Antenna B"                 # Old Faithful: C is UHF-deaf
+ANT = os.environ.get("ATSC3_SWEEP_ANT", "Antenna B")  # override per-antenna sweep
 UHF = list(range(7, 14)) + list(range(14, 37))   # VHF-hi RF7-13 + UHF RF14-36
 #   VHF-hi included 8/05: the user's HDHomeRun confirms ~6 unencrypted 3.0
 #   services locally (virtual 107.1/132.1/145.100/154.1/158.1/158.8), and this
 #   lab's known-active list includes RF7 and RF9 - do not assume UHF-only.
 SCAN_S, HUNT_S = 0.5, 8.0
-OUT = HERE / "band_sweep.json"
+OUT = HERE / (f"band_sweep_{ANT.split()[-1]}.json" if os.environ.get("ATSC3_SWEEP_ANT") else "band_sweep.json")
 
 
 def center_hz(rf):

@@ -78,11 +78,44 @@ def wait_for(path, min_bytes, timeout):
 
 
 def teardown(procs):
+    """Stop every worker we spawned, children included, on both platforms.
+
+    E99 (8/22, Ubuntu): this used taskkill unconditionally; on Linux the
+    command does not exist, the exception was swallowed, and the chain +
+    both audio workers + the caption worker lived on after the window
+    closed -- holding the single-tenant radio. Windows: taskkill /T.
+    Linux: terminate the process and its children (psutil when present,
+    else the process itself), then SIGKILL what refuses."""
     for p in reversed(procs):
         try:
-            if p.poll() is None:
+            if p.poll() is not None:
+                continue
+            if sys.platform.startswith("win"):
                 subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"],
                                capture_output=True)
+                continue
+            kids = []
+            try:
+                import psutil
+                kids = psutil.Process(p.pid).children(recursive=True)
+            except Exception:                                  # noqa: BLE001
+                pass
+            for k in kids:
+                try:
+                    k.terminate()
+                except Exception:                              # noqa: BLE001
+                    pass
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:                                  # noqa: BLE001
+                p.kill()
+            for k in kids:
+                try:
+                    if k.is_running():
+                        k.kill()
+                except Exception:                              # noqa: BLE001
+                    pass
         except Exception:                                      # noqa: BLE001
             pass
 
