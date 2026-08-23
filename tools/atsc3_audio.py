@@ -711,8 +711,14 @@ def main():
                                                            dec.cfg)
                                 pcm[ka] = hf["L"][lead:]
                                 pcm[kb] = hf["R"][lead:]
-                            except Exception:                  # noqa: BLE001
+                            except Exception as _hfe:          # noqa: BLE001
                                 self_hf_fail += 1
+                                if self_hf_fail <= 5 or                                         self_hf_fail % 50 == 0:
+                                    print(f"  ! HF pass failed "
+                                          f"({type(_hfe).__name__}: "
+                                          f"{str(_hfe)[:90]}) -- this pass "
+                                          f"plays CORE-BAND only "
+                                          f"(#{self_hf_fail})", flush=True)
                             lead_pcm[ka] = pa[-LEAD * 1536:]
                             lead_pcm[kb] = pb[-LEAD * 1536:]
                         else:
@@ -782,9 +788,14 @@ def main():
                 pass
             dt_ = time.time() - t_pass
             total_wall += dt_
+            # E116: hf_fail was counted and never SHOWN -- and each failed
+            # apply_hf_pair mutes the whole pass's top octave, which the
+            # listener hears as the sound "going quieter then louder".
+            # A counter nobody reads is indistinguishable from zero.
             print(f"  {cursor} fr ({dec.n_bad} bad), "
                   f"{total_media:.1f} s of audio, "
                   f"pad {n_padded}, behind {behind}, "
+                  f"hf_fail {self_hf_fail}, "
                   f"pass {dt_:.1f} s"
                   + (f", {total_media/total_wall:.2f}x real time"
                      if total_wall > 0 else ""))

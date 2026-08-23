@@ -199,9 +199,18 @@ def main():
         # regime flips: 1x4 0.93x / 2x3 0.95x / 2x2 0.97x sustained. The
         # orchestrator knows it is running the whole stack, so IT carries
         # the small-box override; an explicit --chain-extra still wins.
+        # E117 (8/23): at parity (~1.0x sustained) the default 24-deep raw
+        # queue sheds whole frames on every transient dip (mux burst, audio
+        # pass) -- FEC read a PERFECT 100% because shed frames never reach
+        # it, while video+audio lanes lost the SAME slots (a hole every
+        # ~40 s, 11% of slots) and the audio worker padded the gaps with
+        # silence = the "quieter then louder" report. --raw-queue 600
+        # (~74 s cushion) converts dips into latency the >1.0x stretches
+        # repay: 16 min measured, ZERO holes past the anchor, pads frozen.
+        # The memory only materialises when the queue actually backs up.
         extra = a.chain_extra
         if not extra and (os.cpu_count() or 1) < 8:
-            extra = "--decode-procs 2 --threads 2"
+            extra = "--decode-procs 2 --threads 2 --raw-queue 600"
         chain = spawn([py, "tools/atsc3_run.py", "--rf", str(a.rf),
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
                        "--extra", ("--assets all " + extra).strip()])
@@ -218,10 +227,13 @@ def main():
         pid_e, el_e = LANG[a.lang]
         other = "spa" if a.lang == "eng" else "eng"
         pid_s, el_s = LANG[other]
+        # quiet=False (E116): the worker's pass lines carry n_bad, pads and
+        # hf_fail -- the audio-quality telemetry; DEVNULL made them invisible
         audio = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
                        "--pid", str(pid_e), "--element", el_e,
                        "--channels", "2" if a.stereo else "6",
-                       "--out", os.path.join(live, "live_audio.wav")])
+                       "--out", os.path.join(live, "live_audio.wav")],
+                      quiet=False)
         log(f"audio worker up (pid {audio.pid}) -- {a.lang} pid {pid_e} "
             f"{'stereo' if a.stereo else '5.1'}")
         if both:
