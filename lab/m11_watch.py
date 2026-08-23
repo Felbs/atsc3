@@ -1493,8 +1493,11 @@ def main(argv=None):
                     help="Frames decoded concurrently; results are emitted "
                          "strictly in order, so downstream bytes are "
                          "identical to --decode-workers 1")
-    ap.add_argument("--threads", type=int, default=16)
-    ap.add_argument("--fe-threads", type=int, default=16)
+    ap.add_argument("--threads", type=int, default=None,
+                    help="decode worker threads (default: 16 on a box with "
+                         ">=8 logical cores, one per core below that -- E104)")
+    ap.add_argument("--fe-threads", type=int, default=None,
+                    help="front-end threads (same core-aware default)")
     ap.add_argument("--iters", type=int, default=50)
     ap.add_argument("--block", type=int, default=854_000,
                     help="source block size in samples.  854000 is half a "
@@ -1525,10 +1528,27 @@ def main(argv=None):
     if a.no_margin:
         # before any worker spawns: the config rides the environment
         os.environ["ATSC3_MARGIN"] = "0"
+    ncpu = os.cpu_count() or 1
     if a.decode_procs is None:
-        ncpu = os.cpu_count() or 1
-        a.decode_procs = (0 if a.accel != "cpu" or ncpu < 8
+        # E104 (8/22, measured on a Raspberry Pi 5): a SMALL-CORE box used to
+        # get ZERO decode processes and 16 threads -- 16 threads on 4 cores,
+        # and decode sharing the front end's GIL. Measured on the same air,
+        # RF33, 75 s each: default 0.435x; 2 procs x 16 threads 0.463x;
+        # 3 x 16 0.467x (and 21 re-acquisitions, thrashing); 2 x 2 0.487x;
+        # ONE process x 4 threads 0.533x -- +22% over the default.
+        # One process is what wins: it isolates decode from the front end's
+        # GIL, while further processes only add shared-memory copying without
+        # adding usable cores. That is the opposite of the >=8-core result
+        # (E52: processes bought 2.2x where threads bought 36%), which is
+        # exactly why this is a per-class default and not a rewrite: boxes
+        # with 8 or more logical cores keep their old numbers unchanged.
+        a.decode_procs = (0 if a.accel != "cpu"
+                          else 1 if ncpu < 8
                           else 4 if ncpu >= 24 else 2)
+    if a.threads is None:
+        a.threads = 16 if ncpu >= 8 else max(1, ncpu)
+    if a.fe_threads is None:
+        a.fe_threads = 16 if ncpu >= 8 else max(1, ncpu)
     if a.capture is None and in_meteor_window() and not a.force_meteor:
         ST.log("REFUSING: inside the 02:10-05:40 meteor window.")
         return 3
