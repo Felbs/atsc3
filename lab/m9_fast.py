@@ -49,7 +49,11 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import threading as _threading
+
 import numpy as np
+
+_HERE9 = os.path.dirname(os.path.abspath(__file__))
 
 # Torch and radioconda's NumPy each ship an Intel OpenMP runtime and whichever
 # initialises SECOND aborts the process with "OMP: Error #15".  NumPy loads
@@ -158,6 +162,108 @@ def load_fast(path, rate, fmt=None, span_sec=0.30, start_sec=0.0, notch=True,
 # ---------------------------------------------------------------------------
 # the frame decoder
 # ---------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# E102 -- optional compiled BICM demapper (lab/demap_kernel.c via ctypes)
+#
+# The numpy fast path below is MEMORY-bound, not dispatch-bound: it
+# materialises q = (k*ncell, npts) float32 and then streams it again for
+# `+= p2f`, for `min(2)`, and twice per label bit.  The kernel computes each
+# cell's npts distances in registers and writes only the nb differences plus
+# one d2 scalar, so the big array never reaches DRAM.
+#
+# Fleet laws: OPTIONAL (absent -> numpy fast path, one log line);
+# ATSC3_DEMAP_KERNEL=0 disables it; build per box, never copy the binary.
+# The STATISTICS stay in numpy on purpose -- the kernel returns raw bitwise
+# minima differences and per-cell d2, and the caller computes sigma^2 with
+# np.mean's own pairwise association and applies the same division as before.
+# --------------------------------------------------------------------------
+# E103 -- optional compiled cell-pool equaliser (lab/cellpool_kernel.c)
+#
+# MEASURED before it was written: cell_pool_fast is ~20 ms/Frame on x86, of
+# which the scipy FFT is 23% (untouchable) and the per-class equalise+scatter
+# is 73% -- ~240k complex128 divisions plus four fancy-index passes, each
+# materialising a fresh array.  The kernel fuses gather -> divide ->
+# interpolate -> divide -> scatter into one sweep per symbol and never builds
+# H at all.  Same fleet laws as the other two: OPTIONAL, per box, never copy
+# the binary; ATSC3_CELLPOOL_KERNEL=0 disables it.
+_CELLPOOL_STATE = {"lib": None, "logged": False}
+_CELLPOOL_LOCK = _threading.Lock()
+
+
+def _cellpool_lib():
+    with _CELLPOOL_LOCK:
+        lib = _CELLPOOL_STATE["lib"]
+        if lib is None:
+            lib = False
+            name = ("cellpool_kernel.dll" if os.name == "nt"
+                    else "cellpool_kernel.so")
+            path = os.path.join(_HERE9, name)
+            if os.environ.get("ATSC3_CELLPOOL_KERNEL", "1") != "0":
+                try:
+                    import ctypes
+                    cand = ctypes.CDLL(path)
+                    cand.cellpool_kernel_abi.restype = ctypes.c_int32
+                    if int(cand.cellpool_kernel_abi()) != 1:
+                        raise OSError("kernel ABI mismatch")
+                    i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
+                    f64 = np.ctypeslib.ndpointer(np.float64, flags="C")
+                    cand.cellpool_row_f64.restype = ctypes.c_int32
+                    cand.cellpool_row_f64.argtypes = [
+                        f64, ctypes.c_int32, i32, f64, ctypes.c_int32,
+                        i32, f64, ctypes.c_int32, i32, i32, i32,
+                        ctypes.c_int32, f64, f64]
+                    cand.cellpool_div_scatter_f64.restype = ctypes.c_int32
+                    cand.cellpool_div_scatter_f64.argtypes = [
+                        f64, ctypes.c_int32, f64, ctypes.c_int32,
+                        i32, i32, i32, ctypes.c_int32, f64]
+                    lib = cand
+                except OSError as ex:
+                    if not _CELLPOOL_STATE["logged"]:
+                        _CELLPOOL_STATE["logged"] = True
+                        print(f"[m9_fast] compiled cell-pool kernel "
+                              f"unavailable ({name}: {ex}); numpy path in "
+                              f"use -- python lab/build_cellpool_kernel.py",
+                              file=sys.stderr)
+            _CELLPOOL_STATE["lib"] = lib
+        return lib or None
+
+
+_DEMAP_STATE = {"lib": None, "logged": False}
+_DEMAP_LOCK = _threading.Lock()
+
+
+def _demap_lib():
+    with _DEMAP_LOCK:
+        lib = _DEMAP_STATE["lib"]
+        if lib is None:
+            lib = False
+            name = "demap_kernel.dll" if os.name == "nt" else "demap_kernel.so"
+            path = os.path.join(_HERE9, name)
+            if os.environ.get("ATSC3_DEMAP_KERNEL", "1") != "0":
+                try:
+                    import ctypes
+                    cand = ctypes.CDLL(path)
+                    cand.demap_kernel_abi.restype = ctypes.c_int32
+                    if int(cand.demap_kernel_abi()) != 1:
+                        raise OSError("kernel ABI mismatch")
+                    f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
+                    cand.demap_llr_f32.restype = ctypes.c_int32
+                    cand.demap_llr_f32.argtypes = [
+                        f32, f32, ctypes.c_int32, ctypes.c_int32,
+                        ctypes.c_int32, ctypes.c_int32,
+                        f32, f32, f32, f32, f32]
+                    lib = cand
+                except OSError as ex:
+                    if not _DEMAP_STATE["logged"]:
+                        _DEMAP_STATE["logged"] = True
+                        print(f"[m9_fast] compiled demap kernel unavailable "
+                              f"({name}: {ex}); numpy fast path in use -- "
+                              f"python lab/build_demap_kernel.py",
+                              file=sys.stderr)
+            _DEMAP_STATE["lib"] = lib
+        return lib or None
+
 
 class FrameDecoder:
     """One PLP-0 + PLP-16 subframe-0 decoder, reusable across Frames."""
@@ -387,15 +493,55 @@ class FrameDecoder:
         owner = np.empty(int(offs[-1]), int)
         owner[:len(spare)] = -1
 
+        kern = _cellpool_lib()
+
+        def _ktabs(t):
+            """int32/float64 C-contiguous views of one class's geometry."""
+            k = t.get("_kc")
+            if k is None:
+                g = t["g"]
+                k = t["_kc"] = dict(
+                    bins_pk=np.ascontiguousarray(g["bins_pk"], np.int32),
+                    refpk=np.ascontiguousarray(g["refpk"], np.complex128),
+                    jj=np.ascontiguousarray(t["j"], np.int32),
+                    wt=np.ascontiguousarray(t["wt"], np.float64),
+                    bins_d=np.ascontiguousarray(g["bins_d"], np.int32),
+                    dmap=np.ascontiguousarray(g["d"], np.int32),
+                    hmat=np.ascontiguousarray(t["Hmat"], np.int32))
+            return k
+
         def one_class(t):
             g = t["g"]
+            a, b = t["trim"]
+            if kern is not None:
+                kc = _ktabs(t)
+                nd = t["nd"]
+                npk = len(kc["bins_pk"])
+                hpbuf = np.empty(2 * npk, np.float64)
+                xg1 = np.empty(nd, np.complex128)
+                ok = True
+                for i, l in enumerate(t["rows"]):
+                    row = np.ascontiguousarray(Yb[l], np.complex128)
+                    rc = kern.cellpool_row_f64(
+                        row.view(np.float64), row.shape[0],
+                        kc["bins_pk"], kc["refpk"].view(np.float64), npk,
+                        kc["jj"], kc["wt"], len(kc["jj"]),
+                        kc["bins_d"], kc["dmap"], kc["hmat"][i], nd,
+                        hpbuf, xg1.view(np.float64))
+                    if rc != 0:
+                        ok = False
+                        break
+                    pool[offs[l]:offs[l + 1]] = xg1[a:b]
+                    owner[offs[l]:offs[l + 1]] = l
+                if ok:
+                    return
+                # rc != 0: an index the kernel refused -- fall through to numpy
             Yr = Yb[t["rows"]]
             hp = Yr[:, g["bins_pk"]] / g["refpk"]
             H = hp[:, t["j"]] * (1.0 - t["wt"]) + hp[:, t["j"] + 1] * t["wt"]
             z = Yr[:, g["bins_d"]] / H[:, g["d"]]
             xg = np.empty_like(z)
             xg[np.arange(len(z))[:, None], t["Hmat"]] = z
-            a, b = t["trim"]
             for i, l in enumerate(t["rows"]):
                 pool[offs[l]:offs[l + 1]] = xg[i, a:b]
                 owner[offs[l]:offs[l + 1]] = l
@@ -579,6 +725,16 @@ class FrameDecoder:
         owner[:len(spare)] = -1
         jg, wtg = smt["jg"], smt["wtg"]
 
+        def _ktabs_sm(t):
+            k = t.get("_kcs")
+            if k is None:
+                g = t["g"]
+                k = t["_kcs"] = dict(
+                    bins_d=np.ascontiguousarray(g["bins_d"], np.int32),
+                    dmap=np.ascontiguousarray(g["d"], np.int32),
+                    hmat=np.ascontiguousarray(t["Hmat"], np.int32))
+            return k
+
         def one_class(ci):
             t = cp["tabs"][ci]
             g = t["g"]
@@ -595,10 +751,35 @@ class FrameDecoder:
                 hpf = hp[~sm]
                 H[~sm] = (hpf[:, t["j"]] * (1.0 - t["wt"])
                           + hpf[:, t["j"] + 1] * t["wt"])
+            a, b = t["trim"]
+            kern = _cellpool_lib()
+            if kern is not None:
+                # E103: the divide+scatter tail is where the ~208k complex
+                # divisions per Frame are. H stays numpy's business above --
+                # the smoothing, the per-symbol gain and the change detector
+                # are policy, not arithmetic to hide in C.
+                kc = _ktabs_sm(t)
+                nd = t["nd"]
+                xg1 = np.empty(nd, np.complex128)
+                ok = True
+                for i, l in enumerate(rows):
+                    row = np.ascontiguousarray(Yb[l], np.complex128)
+                    Hc = np.ascontiguousarray(H[i], np.complex128)
+                    rc = kern.cellpool_div_scatter_f64(
+                        row.view(np.float64), row.shape[0],
+                        Hc.view(np.float64), Hc.shape[0],
+                        kc["bins_d"], kc["dmap"], kc["hmat"][i], nd,
+                        xg1.view(np.float64))
+                    if rc != 0:
+                        ok = False
+                        break
+                    pool[offs[l]:offs[l + 1]] = xg1[a:b]
+                    owner[offs[l]:offs[l + 1]] = l
+                if ok:
+                    return
             z = Yr[:, g["bins_d"]] / H[:, g["d"]]
             xg = np.empty_like(z)
             xg[np.arange(len(z))[:, None], t["Hmat"]] = z
-            a, b = t["trim"]
             for i, l in enumerate(rows):
                 pool[offs[l]:offs[l + 1]] = xg[i, a:b]
                 owner[offs[l]:offs[l + 1]] = l
@@ -793,9 +974,43 @@ class FrameDecoder:
             # a rounding re-association, gated at the decoded-bytes level.
             Pf = np.vstack((pts.real, pts.imag)).astype(np.float32)
             p2f = (pts.real ** 2 + pts.imag ** 2).astype(np.float32)
+            # E101 (8/22, Pi 5): fold the -2 into the gemm matrix so the
+            # (k*ncell, npts) result needs one FEWER full pass. Scaling by a
+            # power of two is EXACT in binary floating point and every
+            # product and partial sum scales identically, so this is
+            # bit-exact -- not a rounding concession. Measured on a banked
+            # RF33 capture, ARM: demap 173.7 -> 154.7 ms/Frame (-11%),
+            # decode 424 -> 398, and the decoded video is BYTE-IDENTICAL
+            # (md5 12cbe5a3...). The stage is memory-bandwidth bound, so the
+            # saved pass is the whole win; it helps every platform.
+            Pf = (Pf * np.float32(-2.0)).copy()
+            # E102: the kernel takes the two rows separately, contiguous.
+            Pfx = np.ascontiguousarray(Pf[0])
+            Pfy = np.ascontiguousarray(Pf[1])
+
+        kern = _demap_lib() if fast else None
+        if kern is not None and (nb > 8 or len(pts) != (1 << nb)):
+            kern = None                       # outside the kernel's range
 
         def job(lo, hi):
             z = cells2d[lo:hi]
+            if kern is not None:
+                k = hi - lo
+                zr = np.ascontiguousarray(z.real, np.float32)
+                zi = np.ascontiguousarray(z.imag, np.float32)
+                o = out[lo:hi]                # (k, ncell, nb), C-contiguous
+                d2 = np.empty((k, ncell), np.float32)
+                rc = kern.demap_llr_f32(
+                    zr.reshape(-1), zi.reshape(-1), k, ncell, len(pts), nb,
+                    Pfx, Pfy, p2f, o.reshape(-1), d2.reshape(-1))
+                if rc == 0:
+                    if d2min_out is None:
+                        s2 = np.maximum(d2.mean(1), 1e-9)[:, None]
+                        o /= s2[:, :, None]
+                    else:
+                        d2min_out[lo:hi] = d2
+                    return
+                # rc != 0: shape the kernel cannot serve -- fall through
             if fast:
                 k = hi - lo
                 zr = np.asarray(z.real, np.float32)
@@ -803,8 +1018,7 @@ class FrameDecoder:
                 X = np.empty((k * ncell, 2), np.float32)
                 X[:, 0] = zr.ravel()
                 X[:, 1] = zi.ravel()
-                q = X @ Pf                              # (k*ncell, npts)
-                q *= np.float32(-2.0)
+                q = X @ Pf              # (k*ncell, npts), -2 already folded
                 q += p2f[None, :]
                 q = q.reshape(k, ncell, len(pts))
                 z2 = zr * zr + zi * zi
