@@ -181,6 +181,7 @@ def main():
             cmd, cwd=ROOT,
             stdout=subprocess.DEVNULL if quiet else None,
             stderr=subprocess.STDOUT if quiet else None)
+        p._av_cmd = list(cmd)          # E111: so the supervisor can respawn
         procs.append(p)
         return p
 
@@ -247,13 +248,59 @@ def main():
         #    the window opens on and 'a' cycles.
         #    It waits on the audio frontier itself (--audio-hold), and
         #    closing the window stops it (--exit-on-player-close).
+        # E113: prefer mpv on Linux -- it can use libavcodec hwaccels
+        # (ffplay cannot), and on a Pi 5 the stateless V4L2 HEVC hwaccel
+        # turns the player from ~30% of a core into ~4%. --hwdec=auto falls
+        # back to software wherever no hwaccel serves. Windows keeps ffplay.
+        player = ("mpv" if not sys.platform.startswith("win")
+                  and shutil.which("mpv") else "ffplay")
         tv = [py, "tools/atsc3_tv.py", "--live-dir", live,
-              "--mode", "v2", "--player", "ffplay",
+              "--mode", "v2", "--player", player,
               "--subs", "soft" if a.cc else "none",
               "--exit-on-player-close"] + (["--stereo"] if a.stereo else [])
-        log("starting viewer (atsc3_tv v2/ffplay: HEVC copy + soft CC) -- "
-            "close the window to stop; 't' toggles captions")
-        rc = spawn(tv, quiet=False).wait()
+        log(f"starting viewer (atsc3_tv v2/{player}: HEVC copy + soft CC) -- "
+            f"close the window to stop")
+        tvp = spawn(tv, quiet=False)
+        # E111 -- SUPERVISE THE WORKERS (found the hard way: the video played
+        # all night and the sound stopped at 05:19). The audio worker rolls
+        # its wav before the RIFF 4 GiB wall and exits rc=42, which MEANS
+        # "respawn me" -- atsc3_audio has said so since E61 -- and nothing in
+        # this orchestrator listened. After ~5.5 h of stereo (sooner in 5.1)
+        # the worker exited by design and the mux degraded to silence, which
+        # is exactly what it should do when audio is MISSING, and exactly
+        # wrong as a permanent state. rc=42 -> respawn, always. Any other
+        # death -> respawn too, but stampede-gated (4/hour) so a crash loop
+        # cannot eat the box; past the gate it logs loudly and stays down.
+        deaths = []
+        while tvp.poll() is None:
+            time.sleep(2.0)
+            for w in list(procs):
+                if w is tvp or w.poll() is None:
+                    continue
+                rc_w = w.returncode
+                cmd_w = getattr(w, "_av_cmd", None)
+                procs.remove(w)
+                name = (os.path.basename(cmd_w[1]) if cmd_w and len(cmd_w) > 1
+                        else "worker")
+                if cmd_w is None:
+                    log(f"{name} exited rc={rc_w} and cannot be respawned")
+                    continue
+                if rc_w != 42:
+                    now = time.time()
+                    deaths[:] = [t for t in deaths if now - t < 3600.0]
+                    deaths.append(now)
+                    if len(deaths) > 4:
+                        log(f"** {name} DIED rc={rc_w} -- {len(deaths)} "
+                            f"deaths this hour, NOT respawning (its output "
+                            f"degrades to silence/absence)")
+                        continue
+                    log(f"** {name} died rc={rc_w} -- respawning "
+                        f"({len(deaths)}/4 this hour)")
+                else:
+                    log(f"{name} rolled its wav (rc=42) -- respawning, as "
+                        f"the contract says")
+                spawn(cmd_w)
+        rc = tvp.returncode
         log(f"viewer exited (rc={rc}) -- shutting down")
         return 0
     except KeyboardInterrupt:

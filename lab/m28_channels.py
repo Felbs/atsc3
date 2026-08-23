@@ -142,12 +142,130 @@ def asf_section_data(b, max_sfb, n_sect_bits=5):
     return sfb_cb, sects
 
 
+# --------------------------------------------------------------------------
+# E112 -- optional compiled spectral parse (lab/spectral_kernel.c)
+#
+# asf_spectral_data is the AC-4 decoder's hottest region (58% of
+# decode_frames on a Pi 5): a Python loop reading the stream ONE BIT at a
+# time and walking a dict per Huffman symbol.  The kernel walks the same
+# bits through the same codes, flattened into arrays.  Any kernel error
+# leaves the bit position UNTOUCHED and the Python loop below re-runs from
+# it, so a malformed frame behaves exactly as before.  ATSC3_SPECTRAL_KERNEL=0
+# disables it; the Python loop remains the reference.
+import threading as _threading
+
+_SPEC_STATE = {"lib": None}
+_SPEC_LOCK = _threading.Lock()
+_SPEC_TREES = {}
+
+
+def _spectral_lib():
+    with _SPEC_LOCK:
+        lib = _SPEC_STATE["lib"]
+        if lib is None:
+            lib = False
+            name = ("spectral_kernel.dll" if os.name == "nt"
+                    else "spectral_kernel.so")
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                name)
+            if os.environ.get("ATSC3_SPECTRAL_KERNEL", "1") != "0":
+                try:
+                    import ctypes
+                    cand = ctypes.CDLL(path)
+                    cand.spectral_kernel_abi.restype = ctypes.c_int32
+                    if int(cand.spectral_kernel_abi()) != 1:
+                        raise OSError("ABI mismatch")
+                    i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
+                    i64 = np.ctypeslib.ndpointer(np.int64, flags="C")
+                    u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")
+                    cand.asf_spectral_i32.restype = ctypes.c_int32
+                    cand.asf_spectral_i32.argtypes = [
+                        u8, ctypes.c_int64, i64, i32, ctypes.c_int32,
+                        i32, ctypes.c_int32, i32, i32, i32, i32, i32,
+                        i32, ctypes.c_int32]
+                    lib = cand
+                except OSError:
+                    lib = False
+            _SPEC_STATE["lib"] = lib
+        return lib or None
+
+
+def _spectral_trees(tables):
+    """Flatten the codebooks' (length, codeword) -> symbol maps into walk
+    trees the kernel can follow.  A tree reproduces ANY prefix code exactly;
+    the real books are not canonical, so nothing cleverer is safe.  Built
+    once per tables object."""
+    key = id(tables)
+    hit = _SPEC_TREES.get(key)
+    if hit is not None:
+        return hit[1]
+    nodes = [[0, 0]]                            # throwaway root placeholder
+    nodes = []
+    troot = np.full(12, -1, np.int32)
+
+    def new_node():
+        nodes.append([0, 0])
+        return len(nodes) - 1
+
+    ok = True
+    for cb in range(1, 12):
+        hb = tables.get(cb) if hasattr(tables, "get") else None
+        if hb is None or not getattr(hb, "map", None):
+            continue
+        root = new_node()
+        troot[cb] = root
+        for (L, code), sym in hb.map.items():
+            node = root
+            for i in range(L):
+                bit = (code >> (L - 1 - i)) & 1
+                if i == L - 1:
+                    if nodes[node][bit] != 0:
+                        ok = False              # duplicate/conflicting code
+                    nodes[node][bit] = -(sym + 1)
+                else:
+                    nxt = nodes[node][bit]
+                    if nxt < 0:
+                        ok = False              # code under a leaf
+                        break
+                    if nxt == 0:
+                        nxt = new_node()
+                        nodes[node][bit] = nxt
+                    node = nxt
+    tree = np.ascontiguousarray(np.array(nodes, np.int32).reshape(-1))         if nodes else np.zeros(2, np.int32)
+    dims = np.array([S.CB_DIM.get(c, 0) for c in range(12)], np.int32)
+    mods = np.array([S.CB_MOD.get(c, 0) for c in range(12)], np.int32)
+    offs = np.array([S.CB_OFF.get(c, 0) for c in range(12)], np.int32)
+    tabs = (tree, np.ascontiguousarray(troot), np.ascontiguousarray(dims),
+            np.ascontiguousarray(mods), np.ascontiguousarray(offs))         if ok else None
+    _SPEC_TREES[key] = (tables, tabs)           # keep tables alive: id() key
+    return tabs
+
+
 def asf_spectral_data(b, sects, offsets, tables):
     """Clause 4.2.8.4.  -> quantised lines up to the last section's end."""
     if not sects:                     # max_sfb == 0: a channel with no bands
         return np.zeros(0, dtype=np.int32)
     total = offsets[min(sects[-1][2], len(offsets) - 1)]
     lines = np.zeros(total, dtype=np.int32)
+    kern = _spectral_lib()
+    if kern is not None and isinstance(getattr(b, "d", None),
+                                       (bytes, bytearray)):
+        tabs = _spectral_trees(tables)
+        if tabs is not None:
+            tree, troot, dims, mods, offs_cb = tabs
+            buf = np.frombuffer(b.d, np.uint8)
+            sec = np.ascontiguousarray(np.array(sects, np.int64)
+                                       .astype(np.int32).reshape(-1))
+            offs = np.ascontiguousarray(np.asarray(offsets, np.int32))
+            pos = np.array([b.p], np.int64)
+            rc = kern.asf_spectral_i32(buf, len(b.d), pos, sec, len(sects),
+                                       offs, len(offs), dims, mods, offs_cb,
+                                       tree, troot, lines, len(lines))
+            if rc == 0:
+                b.p = int(pos[0])
+                return lines
+            lines[:] = 0              # partial writes are discarded; the
+            #                           Python loop re-runs from b.p unchanged
     for cb, s0, s1 in sects:
         if cb == 0 or cb > 11:
             continue                      # cb 0 = an all-zero band, no bits

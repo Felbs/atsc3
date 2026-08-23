@@ -1308,7 +1308,8 @@ def kill_prior_player(tmp_dir):
     if not rec:
         return
     pid, want = rec.get("pid"), (rec.get("image") or "").lower()
-    if pid and want in ("vlc.exe", "ffplay.exe", "vlc", "ffplay") \
+    if pid and want in ("vlc.exe", "ffplay.exe", "vlc", "ffplay",
+                         "mpv.exe", "mpv") \
             and _image_name(pid) == want:
         log(f"  one-window law: killing prior {want} pid {pid}")
         kill_tree(pid)
@@ -1432,6 +1433,26 @@ def spawn_ffplay(title, extra=()):
     return subprocess.Popen(
         [ffbin("ffplay"), "-hide_banner", "-loglevel", "error", "-nostats",
          "-window_title", title] + list(extra) + ["-i", "pipe:0"],
+        stdin=subprocess.PIPE, env=display_env(),
+        start_new_session=not IS_WIN)
+
+
+def spawn_mpv_pipe(title, extra=()):
+    """mpv on the pipe -- the hardware-decode player (E113).
+
+    ffplay cannot use libavcodec hwaccels; mpv can. On a Raspberry Pi 5 the
+    V4L2 *stateless* request-API HEVC hwaccel decodes 720p60 at 6.6x real
+    time for ~3% of a core where ffplay's software decode ate ~30% -- the
+    single biggest CPU consumer in the viewing stack after the receiver
+    itself. (The earlier "hardware decode does not work" verdict tested only
+    hevc_v4l2m2m, the STATEFUL wrapper, which is indeed dead on this board;
+    --hwdec=auto finds the stateless path.) --hwdec=auto falls back to
+    software decode wherever no hwaccel serves, so this player is safe
+    everywhere mpv exists.
+    """
+    return subprocess.Popen(
+        ["mpv", "--really-quiet", "--hwdec=auto",
+         f"--title={title}", "--force-window=yes", "-"],
         stdin=subprocess.PIPE, env=display_env(),
         start_new_session=not IS_WIN)
 
@@ -1659,7 +1680,7 @@ def main():
     ap.add_argument("--mode", choices=("v2", "v1"), default="v2",
                     help="v2 = soft subs + dual audio + VLC; "
                          "v1 = burned subs + ffplay (the validated fallback)")
-    ap.add_argument("--player", choices=("auto", "vlc", "ffplay", "none"),
+    ap.add_argument("--player", choices=("auto", "vlc", "ffplay", "mpv", "none"),
                     default="auto")
     ap.add_argument("--vlc-headless", action="store_true",
                     help="spawn VLC with dummy interface/outputs (probes "
@@ -1731,21 +1752,27 @@ def main():
             record_player(tmp, pl, player_image("ffplay"))
             sink = pl.stdin
             log("ffplay window opened; muxing begins")
-    elif a.mode == "v2" and a.player == "ffplay":
+    elif a.mode == "v2" and a.player in ("ffplay", "mpv"):
         # E97: the v2 mux (HEVC COPY, eng+spa, soft DVB captions) piped
         # straight into ffplay -- the broadcast picture untouched, captions
         # rendered by the player ('t' toggles, 'a' cycles audio), and a
         # feed thread between us so a stalled player can never wedge the
         # muxer (the 15:12 freeze).
         def spawn_v2_ffplay():
+            if a.player == "mpv":
+                ex = ["--aid=2"] if a.ffplay_audio == "spa" else []
+                if a.subs == "none":
+                    ex = ex + ["--sid=no"]
+                return spawn_mpv_pipe("LIVE 107.1 (atsc3_tv v2/mpv)", ex)
             ex = ["-ast", "a:1"] if a.ffplay_audio == "spa" else []
             if a.subs == "none":
                 ex += ["-sn"]
             return spawn_ffplay("LIVE 107.1 (atsc3_tv v2/ffplay)", ex)
         pl = spawn_v2_ffplay()
-        record_player(tmp, pl, player_image("ffplay"))
+        record_player(tmp, pl, player_image(a.player))
         sink = PipeFeed(pl.stdin)
-        log("ffplay window opened (v2: HEVC copy + soft CC); muxing begins")
+        log(f"{a.player} window opened (v2: HEVC copy + soft CC); "
+            f"muxing begins")
     else:
         out_ts = a.out or os.path.join(tmp, "live_tv2.ts")
         sink = open(out_ts, "wb")
