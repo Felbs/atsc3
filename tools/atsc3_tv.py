@@ -1450,10 +1450,25 @@ def spawn_mpv_pipe(title, extra=()):
     software decode wherever no hwaccel serves, so this player is safe
     everywhere mpv exists.
     """
+    # auto-COPY, not auto (E113b, measured on the Pi 5): direct interop
+    # hands the VO drm_prime frames in the Pi's SAND layout (rpi4_8), which
+    # the generic Vulkan/GL import samples as a BLUE SCREEN while decode CPU
+    # looks healthy. auto-copy unpacks to normal frames on the way out --
+    # any renderer displays them, and the copy costs a few percent against
+    # the ~30% that software decode did.
+    # --profile=fast: the Pi 5's GPU misses 60 Hz vsync deadlines running
+    # mpv's default render chain (visible as occasional skipped frames while
+    # every upstream metric is clean); fast trades scaler/dither quality for
+    # meeting the deadline, which is the right trade for broadcast TV.
+    # mpv's own desync warning suggests exactly this.
+    cmd = ["mpv", "--really-quiet", "--hwdec=auto-copy", "--profile=fast",
+           f"--title={title}", "--force-window=yes"]
+    logf = os.environ.get("ATSC3_MPV_LOG")
+    if logf:
+        cmd.append(f"--log-file={logf}")
+    cmd += list(extra) + ["-"]
     return subprocess.Popen(
-        ["mpv", "--really-quiet", "--hwdec=auto",
-         f"--title={title}", "--force-window=yes", "-"],
-        stdin=subprocess.PIPE, env=display_env(),
+        cmd, stdin=subprocess.PIPE, env=display_env(),
         start_new_session=not IS_WIN)
 
 
