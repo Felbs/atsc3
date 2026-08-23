@@ -1776,8 +1776,10 @@ def main():
         def spawn_v2_ffplay():
             if a.player == "mpv":
                 ex = ["--aid=2"] if a.ffplay_audio == "spa" else []
-                if a.subs == "none":
-                    ex = ex + ["--sid=no"]
+                # mpv does NOT auto-select subtitle tracks (ffplay does) --
+                # without an explicit --sid the captions exist but never
+                # render, which read as "no subtitles" on the 8/23 soak.
+                ex += ["--sid=no"] if a.subs == "none" else ["--sid=1"]
                 return spawn_mpv_pipe("LIVE 107.1 (atsc3_tv v2/mpv)", ex)
             ex = ["-ast", "a:1"] if a.ffplay_audio == "spa" else []
             if a.subs == "none":
@@ -1839,6 +1841,7 @@ def main():
             f"{'exact' if sess.anchor_exact else 'first_seq fallback'}")
     cursor = None                 # next slot to emit
     audio_wait0 = None            # wall time we began holding for audio (E45b)
+    hold_burnt = 0                # E114: consecutive expired holds stand down
     a_frontier = {"sig": None, "t": time.time()}     # eng wav progress (E61)
     stall_probe = {"t": None, "head": None}          # E61 freeze forensics
     a_carry = {"eng": None, "spa": None}   # mp2 frame-grid carry (E48)
@@ -2079,6 +2082,32 @@ def main():
                 # is the re-anchor-every-pass freeze (E61 hunt)
                 log(f"  anchored at slot {cursor} (head {head}, "
                     f"gen {sess.gen})")
+            # E114 -- BOUNDED LAG: a live viewer shows NOW, never 29
+            # minutes ago. Found on the 8/23 soak: after later wav rolls
+            # the audio-hold waited 75 s per chunk for slots the respawned
+            # worker's coverage had moved past; each wait added ~69 s of
+            # lag and the screen "froze" at one chunk per 75 s while the
+            # chain ran at FEC 100%. Nothing ever re-anchored. Now: if the
+            # cursor falls more than max(4x lag, 120 s) behind the head,
+            # jump back to the lag point exactly as the initial anchor
+            # does, say so, and drop the backlog -- stale television is
+            # not television. The E61 caution stands: a STREAM of these
+            # lines is a re-anchor loop and a bug; occasional ones are
+            # recovery.
+            if not a.replay and cursor is not None:
+                behind_s = (head - cursor) * MPU_SECONDS
+                if behind_s > max(4.0 * a.lag, 120.0):
+                    new_cur = idx[max(0, len(idx)
+                                      - max(2, int(a.lag / MPU_SECONDS)))][0]
+                    log(f"  ** {behind_s:.0f} s behind the head -- "
+                        f"RE-ANCHORING {cursor} -> {new_cur}, dropping the "
+                        f"backlog (E114)")
+                    tel.event("reanchor", behind_s=round(behind_s, 1),
+                              old=int(cursor), new=int(new_cur))
+                    t_clock += (new_cur - cursor) * MPU_SECONDS
+                    cursor = new_cur
+                    audio_wait0 = None
+                    hold_burnt = 0
             # emit while a full chunk sits behind the lag point
             limit = head + 1 if a.replay else \
                 head - int(a.lag / MPU_SECONDS) + 1
@@ -2091,14 +2120,25 @@ def main():
                 # decoded -- bounded, so a dead worker means silence resumes
                 # after --audio-hold, never frozen video. Spanish is not
                 # waited on (a missing second language never holds a chunk).
+                a_rdy = (audio_ready(sess, sess.eng, s_hi)
+                         if not a.replay and a.audio_hold > 0 else None)
+                if a_rdy is True and hold_burnt:
+                    hold_burnt = 0        # audio is back: holds re-arm
                 if not a.replay and a.audio_hold > 0 and not eng_starved \
-                        and audio_ready(sess, sess.eng, s_hi) is False:
+                        and hold_burnt < 2 and a_rdy is False:
                     if audio_wait0 is None:
                         audio_wait0 = time.time()
                     if time.time() - audio_wait0 < a.audio_hold:
                         break        # let the audio frontier catch up
+                    # E114: two consecutive expired holds mean the worker is
+                    # not going to supply these slots (its coverage moved
+                    # on, e.g. across a wav roll) -- stop paying 75 s per
+                    # chunk and emit silence at full rate until audio_ready
+                    # comes back TRUE, which re-arms the hold above.
+                    hold_burnt += 1
                     log(f"  audio-hold expired ({a.audio_hold:.0f}s) at "
-                        f"slot {s_lo} -- emitting with silence")
+                        f"slot {s_lo} -- emitting with silence "
+                        f"({hold_burnt}/2 before the hold stands down)")
                 audio_wait0 = None
                 frags = [f for f in idx if s_lo <= f[0] < s_hi]
                 cues = (parse_srt(os.path.join(d, "live.srt"))

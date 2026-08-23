@@ -147,6 +147,12 @@ def main():
                          "full 5.1 (E98: 5.1 runs 1.87x realtime here; use "
                          "this on a box where it cannot keep up)")
     ap.add_argument("--live-dir", default=None)
+    ap.add_argument("--tv-extra", default="",
+                    help="extra args appended to the atsc3_tv viewer command")
+    ap.add_argument("--chain-extra", default="",
+                    help="extra args appended to the chain's watch command "
+                         "(e.g. \"--decode-procs 2 --threads 2\") -- the "
+                         "tuning experiments' hook")
     ap.add_argument("--python", default=None)
     a = ap.parse_args()
 
@@ -187,9 +193,18 @@ def main():
 
     try:
         # 1. chain: video + audio + caption lanes; owns the radio
+        # E115 (8/23, measured under the FULL stack, 8 min per leg):
+        # decoder-alone the E104 default (1 proc x 4 threads) wins, but with
+        # the audio worker, mux and player also on the box the contention
+        # regime flips: 1x4 0.93x / 2x3 0.95x / 2x2 0.97x sustained. The
+        # orchestrator knows it is running the whole stack, so IT carries
+        # the small-box override; an explicit --chain-extra still wins.
+        extra = a.chain_extra
+        if not extra and (os.cpu_count() or 1) < 8:
+            extra = "--decode-procs 2 --threads 2"
         chain = spawn([py, "tools/atsc3_run.py", "--rf", str(a.rf),
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
-                       "--extra", "--assets all"])
+                       "--extra", ("--assets all " + extra).strip()])
         log(f"chain up (pid {chain.pid}) -- RF{a.rf} on {a.ant}")
 
         # 2. audio workers: BOTH languages, each its own process reading
@@ -257,7 +272,7 @@ def main():
         tv = [py, "tools/atsc3_tv.py", "--live-dir", live,
               "--mode", "v2", "--player", player,
               "--subs", "soft" if a.cc else "none",
-              "--exit-on-player-close"] + (["--stereo"] if a.stereo else [])
+              "--exit-on-player-close"] + (["--stereo"] if a.stereo else [])             + (a.tv_extra.split() if a.tv_extra else [])
         log(f"starting viewer (atsc3_tv v2/{player}: HEVC copy + soft CC) -- "
             f"close the window to stop")
         tvp = spawn(tv, quiet=False)
