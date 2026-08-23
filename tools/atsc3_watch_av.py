@@ -229,9 +229,19 @@ def main():
         pid_s, el_s = LANG[other]
         # quiet=False (E116): the worker's pass lines carry n_bad, pads and
         # hf_fail -- the audio-quality telemetry; DEVNULL made them invisible
+        # E118 (8/23): --start-behind 60 on EVERY worker spawn. Without it
+        # a worker respawned hours into a run (wav roll rc=42, or a crash
+        # that lost state.json) anchors at lane fragment 0 and re-decodes
+        # the WHOLE lane: gaining only ~0.1x on a 1.0x-growing target it
+        # never catches the head, and the new wav hits the 4 GiB wall
+        # BEFORE reaching live -- rolling again, forever (observed live:
+        # rolls at 14:42 and 15:43, audio ~65 min stale, viewer frozen in
+        # a re-anchor loop). At first launch the lane is seconds old, so
+        # the flag is a no-op; on a resume (state intact) it is ignored.
         audio = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
                        "--pid", str(pid_e), "--element", el_e,
                        "--channels", "2" if a.stereo else "6",
+                       "--start-behind", "60",
                        "--out", os.path.join(live, "live_audio.wav")],
                       quiet=False)
         log(f"audio worker up (pid {audio.pid}) -- {a.lang} pid {pid_e} "
@@ -240,6 +250,7 @@ def main():
             audio2 = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
                             "--pid", str(pid_s), "--element", el_s,
                             "--channels", "2",
+                            "--start-behind", "60",
                             "--out", os.path.join(live,
                                                   "live_audio_spa.wav")])
             log(f"audio worker up (pid {audio2.pid}) -- {other} pid {pid_s} "

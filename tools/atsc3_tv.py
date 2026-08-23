@@ -2107,7 +2107,16 @@ def main():
                     t_clock += (new_cur - cursor) * MPU_SECONDS
                     cursor = new_cur
                     audio_wait0 = None
-                    hold_burnt = 0
+                    # E118: hold_burnt is NOT reset here. When audio is
+                    # genuinely far behind (a worker re-decoding after a
+                    # roll), each re-anchor lands on not-ready slots, the
+                    # hold expires, lag rebuilds to the bound, and the next
+                    # re-anchor arrives -- resetting the burnt count made
+                    # that loop immortal (frozen picture, 16:33-16:40
+                    # live). Burnt holds now accumulate ACROSS re-anchors,
+                    # so after two the stand-down engages and the viewer
+                    # degrades to video-with-silence until audio_ready
+                    # comes back True (which alone re-arms the holds).
             # emit while a full chunk sits behind the lag point
             limit = head + 1 if a.replay else \
                 head - int(a.lag / MPU_SECONDS) + 1
