@@ -95,6 +95,38 @@ def log(m):
 # 1 -- the resampler, with phase state
 # ---------------------------------------------------------------------------
 
+
+_DEROT_STATE = {"lib": None}
+
+
+def _derot_lib():
+    """The E107 fused de-rotation, from the cell-pool kernel binary.
+
+    OPTIONAL exactly like the others: absent or ABI-stale -> the two-pass
+    NumPy form below, which stays as the reference.  ATSC3_DEROT_KERNEL=0
+    disables it.
+    """
+    lib = _DEROT_STATE["lib"]
+    if lib is None:
+        lib = False
+        if os.environ.get("ATSC3_DEROT_KERNEL", "1") != "0":
+            try:
+                import ctypes
+                import m9_fast as _F9
+                cand = _F9._cellpool_lib()
+                if cand is not None:
+                    cand.derot_f64.restype = ctypes.c_int32
+                    f64 = np.ctypeslib.ndpointer(np.float64, flags="C")
+                    cand.derot_f64.argtypes = [f64, f64, ctypes.c_int32,
+                                               ctypes.c_double,
+                                               ctypes.c_double]
+                    lib = cand
+            except Exception:                                  # noqa: BLE001
+                lib = False
+        _DEROT_STATE["lib"] = lib
+    return lib or None
+
+
 class PolyResampler:
     """`scipy.signal.resample_poly`, fed a block at a time.
 
@@ -1779,10 +1811,28 @@ class FrontEnd:
                 ramp = np.exp(self.k * np.arange(need) / FS_POST)
                 self._ramp = ramp
 
+            _dk = _derot_lib()
+
             def derot(lo, hi):
                 seg = y[lo:hi]
+                sc = np.exp(self.k * (lo + base) / FS_POST)
+                if (_dk is not None and seg.dtype == np.complex128
+                        and seg.flags.c_contiguous
+                        and ramp.dtype == np.complex128):
+                    # E107: one fused pass instead of two. Same operations
+                    # in the same order per element; the intermediate stays in
+                    # a register rather than costing 13.7 MB written and read
+                    # back. NOT bit-identical (NumPy's complex multiply cannot
+                    # be reproduced in portable C -- measured), so this rides
+                    # on the decoded-bytes gate like the rest of cpu_fast.
+                    rc = _dk.derot_f64(seg.view(np.float64),
+                                       np.ascontiguousarray(
+                                           ramp[:hi - lo]).view(np.float64),
+                                       hi - lo, sc.real, sc.imag)
+                    if rc == 0:
+                        return
                 seg *= ramp[:hi - lo]
-                seg *= np.exp(self.k * (lo + base) / FS_POST)
+                seg *= sc
         else:
             def derot(lo, hi):
                 y[lo:hi] *= np.exp(self.k * np.arange(lo + base, hi + base)

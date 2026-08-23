@@ -58,7 +58,10 @@
 #define DK_MAX_PTS  256         /* 256QAM is the largest A/322 constellation */
 #define DK_MAX_BITS 8           /* log2(256) */
 
-EXPORT int32_t demap_kernel_abi(void) { return 1; }
+/* ABI 2 adds the CPE nearest-point search; a stale ABI-1 build is
+ * refused so the loader falls back to numpy rather than missing a
+ * symbol at argtypes time. */
+EXPORT int32_t demap_kernel_abi(void) { return 2; }
 
 /* Demap k*ncell cells.
  *
@@ -124,6 +127,44 @@ EXPORT int32_t demap_llr_f32(const float *zr, const float *zi,
         float *o = out + c * (size_t)nb;
         for (int32_t i = 0; i < nb; ++i)
             o[i] = amin[i] - bmin[i];
+    }
+    return 0;
+}
+
+/* E105: nearest constellation point per cell, for the common-phase-error
+ * correction (m9_fast._cpe_fast).
+ *
+ * Same disease the demapper had: the numpy path builds an (n, npts) float32
+ * score array, scales it, adds the point energies and argmins along it --
+ * three streaming passes over ~13 MB, three times per Frame.  Here each
+ * cell's scores live in registers and only the winning INDEX is written.
+ * The gather (alphabet[idx]) stays in numpy: it is one indexed copy, and
+ * keeping it there keeps this kernel to one job.
+ *
+ * pfx/pfy arrive ALREADY scaled by -2, as in the demapper, so the score is
+ * |p|^2 - 2 Re(z conj p) -- a monotone function of |z-p|^2, which is why its
+ * argmin is the nearest point.
+ *
+ * TIE RULE: strict `<` keeps the FIRST minimum, exactly what np.argmin
+ * returns.  Ties are not hypothetical here -- the reference's own comment
+ * notes that "a flip needs two points equidistant to within a rounding" --
+ * so the rule has to MATCH, not merely be reasonable.
+ */
+EXPORT int32_t cpe_nearest_f32(const float *zr, const float *zi, int32_t n,
+                               const float *pfx, const float *pfy,
+                               const float *p2f, int32_t npts,
+                               int32_t *idx)
+{
+    if (npts <= 0 || npts > DK_MAX_PTS || n < 0) return 1;
+    for (int32_t c = 0; c < n; ++c) {
+        const float x = zr[c], y = zi[c];
+        float best = x * pfx[0] + y * pfy[0] + p2f[0];
+        int32_t arg = 0;
+        for (int32_t j = 1; j < npts; ++j) {
+            const float sc = x * pfx[j] + y * pfy[j] + p2f[j];
+            if (sc < best) { best = sc; arg = j; }
+        }
+        idx[c] = arg;
     }
     return 0;
 }

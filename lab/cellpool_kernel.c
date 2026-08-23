@@ -44,7 +44,11 @@
 #define EXPORT
 #endif
 
-EXPORT int32_t cellpool_kernel_abi(void) { return 1; }
+/* ABI 2 adds cellpool_row_sm_f64 (the smoothed-CE row). A stale ABI-1
+ * build is refused so the loader falls back to numpy rather than
+ * missing a symbol at argtypes time. */
+/* ABI 3 adds derot_f64 (the front end's fused de-rotation). */
+EXPORT int32_t cellpool_kernel_abi(void) { return 3; }
 
 /* Smith's algorithm: (ar + i*ai) / (br + i*bi) -> (*qr, *qi). */
 static inline void cdiv(double ar, double ai, double br, double bi,
@@ -154,6 +158,102 @@ EXPORT int32_t cellpool_div_scatter_f64(const double *Yrow, int32_t nfft,
         if (t < 0 || t >= nd) return 6;
         cdiv(Yrow[2 * b], Yrow[2 * b + 1], H[2 * c], H[2 * c + 1],
              &xg[2 * t], &xg[2 * t + 1]);
+    }
+    return 0;
+}
+
+/* Complex multiply in NumPy's association: (ar*br - ai*bi, ar*bi + ai*br). */
+static inline void cmul(double ar, double ai, double br, double bi,
+                        double *pr, double *pi)
+{
+    *pr = ar * br - ai * bi;
+    *pi = ar * bi + ai * br;
+}
+
+/* E106: equalise ONE symbol whose channel comes from the SMOOTHED pilot grid.
+ *
+ * cell_pool_fast_sm built the channel as a full (nrows, ncar) complex128
+ * array -- two fancy-index gathers off the grid, an interpolation, and a
+ * gain multiply, ~3.4 MB per gather -- and only then divided by it. Measured
+ * on x86: that H-building was 13.0 ms/Frame, MORE than the FFT it sits next
+ * to. Nothing needs H to exist as an array: each data cell needs exactly one
+ * value of it, so the interpolation happens here, in registers, one cell at
+ * a time, and the array is never allocated.
+ *
+ * The arithmetic is the numpy path's, association for association:
+ *   Hc = Hg[jg[c]] * (1 - wtg[c]) + Hg[jg[c]+1] * wtg[c]
+ *   H  = Hc * cl                       (complex multiply, numpy's ordering)
+ *   z  = Yrow[bins_d[i]] / H
+ *
+ * Hg : ngrid complex128 -- this symbol's column of the smoothed pilot grid
+ * cl : the per-symbol complex gain that rides OUTSIDE the boxcar (E60)
+ */
+EXPORT int32_t cellpool_row_sm_f64(const double *Yrow, int32_t nfft,
+                                   const double *Hg, int32_t ngrid,
+                                   const int32_t *jg, const double *wtg,
+                                   int32_t ncar,
+                                   double cl_re, double cl_im,
+                                   const int32_t *bins_d, const int32_t *dmap,
+                                   const int32_t *hmat, int32_t nd,
+                                   double *xg)
+{
+    if (nd < 0 || ncar < 0 || ngrid < 2) return 1;
+    for (int32_t i = 0; i < nd; ++i) {
+        const int32_t c = dmap[i];
+        if (c < 0 || c >= ncar) return 3;
+        const int32_t lo = jg[c];
+        if (lo < 0 || lo + 1 >= ngrid) return 4;
+        const double w = wtg[c], w1 = 1.0 - w;
+        const double cr = Hg[2 * lo] * w1 + Hg[2 * (lo + 1)] * w;
+        const double ci = Hg[2 * lo + 1] * w1 + Hg[2 * (lo + 1) + 1] * w;
+        double hr, hi;
+        cmul(cr, ci, cl_re, cl_im, &hr, &hi);
+
+        const int32_t b = bins_d[i];
+        if (b < 0 || b >= nfft) return 5;
+        const int32_t t = hmat[i];
+        if (t < 0 || t >= nd) return 6;
+        cdiv(Yrow[2 * b], Yrow[2 * b + 1], hr, hi, &xg[2 * t], &xg[2 * t + 1]);
+    }
+    return 0;
+}
+
+/* E107: the front end's de-rotation, fused into ONE pass.
+ *
+ * m11_stream applied the cached CFO ramp and the per-chunk phasor as two
+ * separate NumPy multiplies:  seg *= ramp;  seg *= scalar.  The stream is
+ * complex128, so an 854k-sample block is 13.7 MB and each pass reads and
+ * rewrites all of it -- measured on a Raspberry Pi 5 at 15-20 ms per block,
+ * two blocks per Frame, which is most of that box's 58 ms de-rotation.
+ *
+ * Per element the operations and their order are the reference's --
+ *   tmp = seg[i] * ramp[i];  seg[i] = tmp * scalar
+ * -- and tmp stays in a register instead of being written out and read back,
+ * which is the whole point: one streaming pass instead of two.
+ *
+ * It is NOT bit-identical to NumPy, and that was MEASURED rather than
+ * assumed: NumPy's complex128 multiply reproduces neither the textbook
+ * (ar*br - ai*bi, ar*bi + ai*br) nor an FMA-contracted form of it -- both
+ * were implemented and compared, and both differ by ~1e-16 relative.  So the
+ * bar here is the same one cpu_fast itself runs under: a tight relative
+ * bound plus DECODED-BYTES identity.  On 14-bit ADC samples a 1e-15 relative
+ * perturbation of the de-rotation is nine orders below the float32 the
+ * demapper immediately converts to.
+ *
+ * y     : n complex128, modified IN PLACE
+ * ramp  : n complex128 (at least n entries)
+ * sr/si : the per-chunk scalar phasor
+ */
+EXPORT int32_t derot_f64(double *y, const double *ramp, int32_t n,
+                         double sr, double si)
+{
+    if (n < 0) return 1;
+    for (int32_t i = 0; i < n; ++i) {
+        const double ar = y[2 * i], ai = y[2 * i + 1];
+        const double br = ramp[2 * i], bi = ramp[2 * i + 1];
+        double tr, ti;
+        cmul(ar, ai, br, bi, &tr, &ti);       /* seg * ramp */
+        cmul(tr, ti, sr, si, &y[2 * i], &y[2 * i + 1]);   /* * scalar */
     }
     return 0;
 }

@@ -74,6 +74,42 @@ def _cmp(tag, a, b, fails):
     fails.append(f"{tag} not bit-identical")
 
 
+# The smoothed path's bar, and why it is NOT bit-identity.
+#
+# E106 interpolates the channel off the smoothed grid INSIDE the kernel so the
+# (nrows, ncar) complex128 array and its two fancy-index gathers -- measured at
+# 13.0 ms/Frame, more than the FFT beside it -- never happen. The interpolation
+# itself is bit-identical; the per-symbol GAIN multiply is not, because modern
+# NumPy's complex multiply is not the textbook (ar*br - ai*bi, ar*bi + ai*br)
+# and cannot be reproduced portably in C -- measured here, not assumed.
+# Keeping bit-identity would mean keeping numpy's H-building, i.e. keeping the
+# entire cost this change removes.
+# So the smoothed leg asserts a tight RELATIVE bound (a few float64 ulp on the
+# pool) and DECODED BYTES are the authority -- the same licence cpu_fast
+# itself runs under. Measured: all three media lanes byte-identical.
+# The PLAIN path keeps bit-identity as its bar and still meets it (leg 1).
+SM_MAX_ULP = 16.0
+
+
+def _cmp_sm(tag, a, b, fails):
+    _COMPARED[0] += 1
+    if np.array_equal(a, b):
+        print(f"    {tag}: BIT-IDENTICAL ({a.size} values)")
+        return
+    d = np.abs(a.astype(np.complex128) - b.astype(np.complex128))
+    if not np.isfinite(d).all():
+        print(f"    {tag}: NON-FINITE divergence")
+        fails.append(f"{tag} non-finite")
+        return
+    scale = float(np.abs(b).max()) or 1.0
+    ulps = float(d.max()) / scale / float(np.finfo(np.float64).eps)
+    ok = ulps <= SM_MAX_ULP
+    print(f"    {tag}: {'within' if ok else 'OUTSIDE'} bound  "
+          f"max {ulps:.2f} ulp  ({a.size} values)")
+    if not ok:
+        fails.append(f"{tag} exceeded {SM_MAX_ULP} ulp (max {ulps:.2f})")
+
+
 def leg_sm(fails, cap, rate, frames):
     """The SMOOTHED path (E58/E60) -- this is the one the default config
     actually runs (margin levers are on by default), so it is not optional.
@@ -87,7 +123,7 @@ def leg_sm(fails, cap, rate, frames):
     n = _pool(cap, rate, False, frames, smoothed=True)
     for i, ((pk, ok_), (pn, on)) in enumerate(zip(k, n)):
         print(f"  frame {i}")
-        _cmp("pool    ", pk, pn, fails)
+        _cmp_sm("pool    ", pk, pn, fails)
         _cmp("symbol_of", ok_, on, fails)
 
 
@@ -178,7 +214,8 @@ def main(argv=None):
         for f in fails:
             print(f"  - {f}")
         return 1
-    print("GATE PASSED -- the kernel reproduces cell_pool_fast bit for bit")
+    print("GATE PASSED -- plain path bit-identical; smoothed path within the "
+          "ulp bound (decoded bytes are its authority)")
     return 0
 
 

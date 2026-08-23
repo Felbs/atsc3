@@ -102,8 +102,8 @@ def smoke(path):
     import numpy as np
     dll = ctypes.CDLL(path)
     dll.cellpool_kernel_abi.restype = ctypes.c_int32
-    if int(dll.cellpool_kernel_abi()) != 1:
-        return "ABI mismatch"
+    if int(dll.cellpool_kernel_abi()) != 3:
+        return "ABI mismatch (rebuild: the source gained derot_f64)"
     i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
     f64 = np.ctypeslib.ndpointer(np.float64, flags="C")
     dll.cellpool_row_f64.restype = ctypes.c_int32

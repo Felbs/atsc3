@@ -102,8 +102,8 @@ def smoke(path):
     dll = ctypes.CDLL(path)
     dll.demap_kernel_abi.restype = ctypes.c_int32
     abi = int(dll.demap_kernel_abi())
-    if abi != 1:
-        return f"ABI {abi} != 1"
+    if abi != 2:
+        return f"ABI {abi} != 2 (rebuild: the source gained cpe_nearest_f32)"
     f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
     dll.demap_llr_f32.restype = ctypes.c_int32
     dll.demap_llr_f32.argtypes = [f32, f32, ctypes.c_int32, ctypes.c_int32,
@@ -126,6 +126,19 @@ def smoke(path):
         return f"d2 {float(d2[0])!r} should be ~0 on top of a point"
     if not (out[0] > 0 and out[1] > 0):
         return f"LLR signs wrong: {out!r}"
+    # cpe_nearest_f32: a cell sitting on point 2 must choose point 2.
+    i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
+    dll.cpe_nearest_f32.restype = ctypes.c_int32
+    dll.cpe_nearest_f32.argtypes = [f32, f32, ctypes.c_int32,
+                                    f32, f32, f32, ctypes.c_int32, i32]
+    zr2 = np.ascontiguousarray(pts.real[[2, 0, 3]], np.float32)
+    zi2 = np.ascontiguousarray(pts.imag[[2, 0, 3]], np.float32)
+    idx = np.zeros(3, np.int32)
+    rc = dll.cpe_nearest_f32(zr2, zi2, 3, pfx, pfy, p2f, 4, idx)
+    if rc != 0:
+        return f"cpe_nearest_f32 returned {rc}"
+    if list(idx) != [2, 0, 3]:
+        return f"cpe_nearest_f32 picked {list(idx)}, expected [2, 0, 3]"
     return None
 
 
