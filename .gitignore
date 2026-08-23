@@ -12,6 +12,8 @@ lab/*
 !lab/demap_kernel.c
 # E103: same law for the compiled cell-pool equaliser's source.
 !lab/cellpool_kernel.c
+# E109: same law for the AC-4 QMF bank's source.
+!lab/qmf_kernel.c
 # The per-carrier gain table is CALIBRATION CONFIG, not a capture artifact:
 # it is hand-edited, diffed and reviewed, and a value nobody can see in git
 # is a value nobody can check (the gitignore-hides-data law). Keep it in.

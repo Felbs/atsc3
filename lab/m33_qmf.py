@@ -58,8 +58,30 @@ NSB = 64                     # num_qmf_subbands
 NWIN = 640                   # num_qmf_win_coef
 
 
+BANK = os.path.join(HERE, "spec_bank", "ac4_qwin.json")
+
+
 def qwin(path=None):
-    """The 640-tap QMF prototype, read as FLOATS from the spec's C file."""
+    """The 640-tap QMF prototype, as FLOATS.
+
+    Prefers the spec's C file; falls back to the banked coefficients.
+
+    E108, and it was a REAL user-facing hole: the AC-4 Huffman codebooks were
+    banked on 8/12 so a fresh clone could decode, but this prototype filter
+    was not -- and it is what A-SPX high-frequency regeneration needs. Without
+    it `apply_hf_pair` raised FileNotFoundError, the audio worker counted a
+    silent `self_hf_fail` and carried on, so every clone WITHOUT the ETSI
+    source produced core-band-only audio: it decoded, it played, and it was
+    quietly missing its top octave. Measured on a Raspberry Pi running a
+    public clone. The coefficients are numeric facts and round-trip
+    bit-identically; the document itself is still not ours to redistribute.
+    """
+    if path is None and not os.path.exists(H.DEFAULT_C) and             os.path.exists(BANK):
+        import json
+        w = np.asarray(json.load(open(BANK, encoding="utf-8"))["coef"], float)
+        if w.size != NWIN:
+            raise ValueError(f"banked QWIN has {w.size} taps, expected {NWIN}")
+        return w
     src = open(path or H.DEFAULT_C, encoding="utf-8", errors="replace").read()
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
     m = re.search(r"const\s+\w+\s+QWIN\s*\[\s*(\d*)\s*\]\s*=\s*\{(.*?)\}\s*;",
@@ -89,9 +111,51 @@ def synthesis_matrix(const):
                   * (2 * n - const)) / NSB
 
 
+_QMF_STATE = {"lib": None}
+
+
+def _qmf_lib():
+    """The E109 compiled QMF bank.  OPTIONAL: absent -> the NumPy loops
+    below, which stay the reference.  ATSC3_QMF_KERNEL=0 disables it."""
+    lib = _QMF_STATE["lib"]
+    if lib is None:
+        lib = False
+        name = "qmf_kernel.dll" if os.name == "nt" else "qmf_kernel.so"
+        path = os.path.join(HERE, name)
+        if os.environ.get("ATSC3_QMF_KERNEL", "1") != "0":
+            try:
+                import ctypes
+                cand = ctypes.CDLL(path)
+                cand.qmf_kernel_abi.restype = ctypes.c_int32
+                if int(cand.qmf_kernel_abi()) != 1:
+                    raise OSError("ABI mismatch")
+                f64 = np.ctypeslib.ndpointer(np.float64, flags="C")
+                for fn in ("qmf_analyse_f64", "qmf_synthesise_f64"):
+                    g = getattr(cand, fn)
+                    g.restype = ctypes.c_int32
+                    g.argtypes = [f64, ctypes.c_int32, f64, f64, f64]
+                lib = cand
+            except OSError:
+                lib = False
+        _QMF_STATE["lib"] = lib
+    return lib or None
+
+
 def analyse(pcm, w, M):
     """Clause 5.7.3.2 / Pseudocode 65.  -> (64, num_timeslots) complex."""
     nts = len(pcm) // NSB
+    _k = _qmf_lib()
+    if _k is not None and nts > 0:
+        # E109: the loop below is ~2880 iterations of tiny NumPy calls for a
+        # few seconds of audio -- dispatch-bound, like E53's LDPC.
+        out = np.empty((NSB, nts), np.complex128)
+        rc = _k.qmf_analyse_f64(
+            np.ascontiguousarray(pcm[:nts * NSB], np.float64), nts,
+            np.ascontiguousarray(w, np.float64),
+            np.ascontiguousarray(M, np.complex128).view(np.float64),
+            out.view(np.float64))
+        if rc == 0:
+            return out
     filt = np.zeros(NWIN)
     out = np.empty((NSB, nts), complex)
     for ts in range(nts):
@@ -108,6 +172,15 @@ def analyse(pcm, w, M):
 def synthesise(Q, w, N):
     """Clause 5.7.4.2.  -> real PCM."""
     nts = Q.shape[1]
+    _k = _qmf_lib()
+    if _k is not None and nts > 0:
+        out = np.empty(nts * NSB, np.float64)
+        rc = _k.qmf_synthesise_f64(
+            np.ascontiguousarray(Q, np.complex128).view(np.float64), nts,
+            np.ascontiguousarray(w, np.float64),
+            np.ascontiguousarray(N, np.complex128).view(np.float64), out)
+        if rc == 0:
+            return out
     filt = np.zeros(10 * 2 * NSB)                      # 1280
     out = np.empty(nts * NSB)
     g = np.empty(NWIN)

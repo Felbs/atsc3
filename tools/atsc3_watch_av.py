@@ -127,11 +127,21 @@ def main():
     ap.add_argument("--rf", type=int, required=True)
     ap.add_argument("--ant", default="Antenna B")
     ap.add_argument("--lang", choices=("eng", "spa"), default="eng",
-                    help="audio track selected when the window opens "
-                         "(BOTH are decoded; press 'a' in the window to "
-                         "switch): eng = pid13 5.1 main, spa = pid14 SAP")
+                    help="which audio programme to decode and open "
+                         "on: eng = pid13 5.1 main, spa = pid14 SAP. With "
+                         "--both-langs the other one is decoded too and 'a' "
+                         "switches between them.")
     ap.add_argument("--cc", action="store_true",
                     help="closed captions as a soft track ('t' toggles)")
+    ap.add_argument("--both-langs", dest="both_langs", default=None,
+                    action="store_true",
+                    help="decode BOTH audio programmes so 'a' switches between "
+                         "them. Default: on a box with >=8 logical cores. "
+                         "Below that only the --lang programme is decoded, "
+                         "because the second worker costs a core the decoder "
+                         "needs (E110, measured on a Raspberry Pi 5).")
+    ap.add_argument("--one-lang", dest="both_langs", action="store_false",
+                    help="decode only the --lang programme")
     ap.add_argument("--stereo", action="store_true",
                     help="decode the main as L/R-only stereo instead of "
                          "full 5.1 (E98: 5.1 runs 1.87x realtime here; use "
@@ -187,19 +197,28 @@ def main():
         #    pair -> live_audio_spa.wav. atsc3_tv muxes both; 'a' in the
         #    window switches. A missing SAP lane just yields silence on
         #    track 2 -- it never fails the chunk.
-        pid_e, el_e = LANG["eng"]
-        pid_s, el_s = LANG["spa"]
+        ncpu = os.cpu_count() or 1
+        both = a.both_langs if a.both_langs is not None else ncpu >= 8
+        pid_e, el_e = LANG[a.lang]
+        other = "spa" if a.lang == "eng" else "eng"
+        pid_s, el_s = LANG[other]
         audio = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
                        "--pid", str(pid_e), "--element", el_e,
                        "--channels", "2" if a.stereo else "6",
                        "--out", os.path.join(live, "live_audio.wav")])
-        log(f"audio worker up (pid {audio.pid}) -- eng pid {pid_e} "
+        log(f"audio worker up (pid {audio.pid}) -- {a.lang} pid {pid_e} "
             f"{'stereo' if a.stereo else '5.1'}")
-        audio2 = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
-                        "--pid", str(pid_s), "--element", el_s,
-                        "--channels", "2",
-                        "--out", os.path.join(live, "live_audio_spa.wav")])
-        log(f"audio worker up (pid {audio2.pid}) -- spa pid {pid_s} stereo")
+        if both:
+            audio2 = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
+                            "--pid", str(pid_s), "--element", el_s,
+                            "--channels", "2",
+                            "--out", os.path.join(live,
+                                                  "live_audio_spa.wav")])
+            log(f"audio worker up (pid {audio2.pid}) -- {other} pid {pid_s} "
+                f"stereo")
+        else:
+            log(f"second programme ({other}) NOT decoded -- {ncpu} cores; "
+                f"--both-langs forces it (E110)")
 
         # 3. caption worker (optional)
         if a.cc:
@@ -231,7 +250,6 @@ def main():
         tv = [py, "tools/atsc3_tv.py", "--live-dir", live,
               "--mode", "v2", "--player", "ffplay",
               "--subs", "soft" if a.cc else "none",
-              "--ffplay-audio", a.lang,
               "--exit-on-player-close"] + (["--stereo"] if a.stereo else [])
         log("starting viewer (atsc3_tv v2/ffplay: HEVC copy + soft CC) -- "
             "close the window to stop; 't' toggles captions")

@@ -261,6 +261,20 @@ def noise_table(path=None):
     which is checkable and is the gate on the transcription.
     """
     import re
+    # E108: fall back to the banked coefficients when the ETSI source is
+    # absent -- which is every clone, since the document is not ours to
+    # redistribute. Without this the A-SPX high-frequency regeneration raised
+    # FileNotFoundError, atsc3_audio counted a silent `self_hf_fail`, and the
+    # listener got core-band-only audio that decoded and played and was
+    # quietly missing its top octave.
+    bank = os.path.join(HERE, "spec_bank", "ac4_aspx_noise.json")
+    if path is None and not os.path.exists(H.DEFAULT_C)             and os.path.exists(bank):
+        import json
+        d = json.load(open(bank, encoding="utf-8"))
+        a = np.asarray(d["re"], float) + 1j * np.asarray(d["im"], float)
+        if a.size != 512:
+            raise ValueError(f"banked ASPX_NOISE has {a.size}, expected 512")
+        return a
     src = open(path or H.DEFAULT_C, encoding="utf-8",
                errors="replace").read()
     src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)

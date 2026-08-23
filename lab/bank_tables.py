@@ -39,6 +39,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BANK_DIR = os.path.join(HERE, "spec_bank")
 NUC_BANK = os.path.join(BANK_DIR, "nuc_a322.npz")
 SFB_BANK = os.path.join(BANK_DIR, "ac4_sfb_offsets.json")
+QWIN_BANK = os.path.join(HERE, "spec_bank", "ac4_qwin.json")
+NOISE_BANK = os.path.join(HERE, "spec_bank", "ac4_aspx_noise.json")
 HCB_BANK = os.path.join(BANK_DIR, "ac4_huffman.json")
 
 
@@ -144,7 +146,64 @@ def build_sfb(verify: bool = False) -> int:
     print(f"banked {len(out)} AC-4 band tables -> {SFB_BANK} "
           f"({os.path.getsize(SFB_BANK):,} bytes)")
     print("gate: every layout monotonic and ends at its transform length")
-    return build_hcb(verify=verify)
+    rc = build_hcb(verify=verify)
+    return rc or build_floats(verify=verify)
+
+
+def build_floats(verify: bool = False) -> int:
+    """Bank the two AC-4 FLOAT tables the A-SPX path needs (E108).
+
+    The codebooks and band layouts were banked on 8/12 so a fresh clone could
+    decode; these two were missed, and they are what high-frequency
+    regeneration needs. Without them a clone decoded core-band-only audio and
+    said nothing about it. Each is gated on a property the spec itself states,
+    so a bad transcription cannot be banked quietly.
+    """
+    import json
+    import numpy as np
+    import m23_hcb as H
+    if not os.path.exists(H.DEFAULT_C):
+        print(f"note: {os.path.basename(H.DEFAULT_C)} not present -- skipping "
+              f"the AC-4 float tables (the committed bank stands)")
+        return 0
+    import m33_qmf as Q
+    import m36_envadj as E
+    qw = Q.qwin(H.DEFAULT_C)
+    nt = E.noise_table(H.DEFAULT_C)
+    if qw.size != 640:
+        print(f"REFUSING TO BANK: QWIN has {qw.size} taps, expected 640")
+        return 1
+    mag = np.abs(nt)
+    if nt.size != 512 or not np.allclose(mag, 1.0, atol=1e-6):
+        print(f"REFUSING TO BANK: ASPX_NOISE {nt.size} entries, magnitude "
+              f"{mag.min():.6f}..{mag.max():.6f} (the spec says unit)")
+        return 1
+    pairs = ((QWIN_BANK, {"name": "QWIN", "n": int(qw.size),
+                          "coef": [float(x) for x in qw]}),
+             (NOISE_BANK, {"name": "ASPX_NOISE", "n": int(nt.size),
+                           "re": [float(x) for x in nt.real],
+                           "im": [float(x) for x in nt.imag]}))
+    for path, payload in pairs:
+        if verify:
+            if not os.path.exists(path):
+                print(f"error: no bank at {path}")
+                return 1
+            have = json.load(open(path, encoding="utf-8"))
+            for k in payload:
+                if have.get(k) != payload[k]:
+                    print(f"verify FAILED: {os.path.basename(path)} field {k}")
+                    return 1
+            print(f"verify: {os.path.basename(path)} matches a fresh parse")
+            continue
+        payload["note"] = ("Numeric facts only -- the ETSI document itself is "
+                           "not ours to redistribute.")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            json.dump(payload, fh, indent=1)
+            fh.write("\n")
+        print(f"banked {payload['name']} -> {path} "
+              f"({os.path.getsize(path):,} bytes)")
+    print("gate: QWIN 640 taps; ASPX_NOISE 512 entries of unit magnitude")
+    return 0
 
 
 def build_hcb(verify: bool = False) -> int:
