@@ -63,7 +63,19 @@ OWNER, PRI = "atsc3_survey", 50    # lab priority: yields to sat passes + humans
 
 
 def center_hz(rf):
-    lo = (174 + (rf - 7) * 6) if rf < 14 else (470 + (rf - 14) * 6)
+    # US TV allocations are NOT one arithmetic run. Two discontinuities:
+    # 72-76 MHz is aeronautical (so ch4 -> ch5 jumps), and high-VHF
+    # restarts at 174. FIXED 9/08: the old one-liner treated everything
+    # below 14 as high-VHF and returned 144 MHz for ch2 -- off by 87 MHz,
+    # which made low-VHF silently unsurveyable rather than merely absent.
+    if rf < 5:
+        lo = 54 + (rf - 2) * 6          # ch2-4   54-72
+    elif rf < 7:
+        lo = 76 + (rf - 5) * 6          # ch5-6   76-88
+    elif rf < 14:
+        lo = 174 + (rf - 7) * 6         # ch7-13  174-216
+    else:
+        lo = 470 + (rf - 14) * 6        # ch14+   470-608
     return (lo + 3.0) * 1e6
 
 
