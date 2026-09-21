@@ -173,3 +173,135 @@ def selftest(verbose=True):
 
 if __name__ == "__main__":
     raise SystemExit(0 if selftest() else 1)
+
+
+# ---------------------------------------------------------------------------
+# A/322 7.1.5.2 -- the HTI CELL INTERLEAVER
+#
+# RF33 PLP 0 signals L1D_plp_HTI_cell_interleaver = 0, so this stage was
+# bypassed and never written.  field-site RF8 signals 1.  Without it the
+# cells inside every FEC Block are in transmitter order, the LDPC is fed a
+# permuted codeword, and no amount of signal strength makes it converge --
+# which is exactly the "0 of N Blocks at any SNR" this chain showed.
+#
+# Two generators, per the spec:
+#   C_r(j) = [C_0(j) + P(r)] mod N_cells
+#   C_0    -- an Nd-bit LFSR word, values >= N_cells discarded
+#   P(r)   -- bit-reversed counter over Nd bits, values >= N_cells skipped
+# P(r) is gated against the test vector A/322 7.1.5.2 prints in its own text
+# (N_cells = 10800, N_d = 14 -> 0, 8192, 4096, 2048, 10240, 6144, 1024, 9216).
+# ---------------------------------------------------------------------------
+
+# R_i[Nd-2] feedback taps, on R_{i-1}, per Nd.  A/322 7.1.5.2.
+_CI_TAPS = {11: (0, 3), 12: (0, 2), 13: (0, 1, 4, 6),
+            14: (0, 1, 4, 5, 9, 11), 15: (0, 1, 2, 12)}
+_CI_CACHE = {}
+
+
+def _ci_nd(ncells):
+    nd = int(np.ceil(np.log2(ncells)))
+    if nd not in _CI_TAPS:
+        raise ValueError(f"no A/322 7.1.5.2 taps for Nd={nd} "
+                         f"(N_cells={ncells})")
+    return nd
+
+
+def cell_basic_permutation(ncells):
+    """C_0(j): the basic permutation, as an int array of length `ncells`."""
+    hit = _CI_CACHE.get(ncells)
+    if hit is not None:
+        return hit
+    nd = _ci_nd(ncells)
+    taps = _CI_TAPS[nd]
+    out = np.empty(ncells, np.int64)
+    q = 0
+    prev = np.zeros(nd, np.uint8)
+    for i in range(1 << nd):
+        r = np.zeros(nd, np.uint8)
+        if i == 2:
+            r[0] = 1
+        elif i > 2:
+            r[0:nd - 2] = prev[1:nd - 1]
+            b = 0
+            for t in taps:
+                b ^= int(prev[t])
+            r[nd - 2] = b
+        r[nd - 1] = i & 1
+        v = int(np.dot(r.astype(np.int64), 1 << np.arange(nd, dtype=np.int64)))
+        if v < ncells:
+            if q < ncells:
+                out[q] = v
+            q += 1
+        prev = r
+    if q != ncells:
+        raise ValueError(f"C_0 produced {q} values for N_cells={ncells}")
+    _CI_CACHE[ncells] = out
+    return out
+
+
+def cell_shift(ncells, nblocks):
+    """P(r) for r = 0 .. nblocks-1."""
+    nd = _ci_nd(ncells)
+    out, k = [], 0
+    while len(out) < nblocks:
+        v = int(format(k, "0%db" % nd)[::-1], 2)
+        if v < ncells:
+            out.append(v)
+        k += 1
+    return np.array(out, np.int64)
+
+
+def cell_deinterleave(blocks):
+    """Undo 7.1.5.2 for a (nblocks, ncells) array of one TI Block's cells.
+
+    The transmitter reads out[j] = in[C_r(j)], so the receiver scatters:
+    in[C_r(j)] = out[j].  `r` is the FEC Block index within the TI Block,
+    which is why this takes the whole TI Block and not one Block at a time.
+    """
+    blocks = np.asarray(blocks)
+    nblk, ncells = blocks.shape
+    c0 = cell_basic_permutation(ncells)
+    pr = cell_shift(ncells, nblk)
+    out = np.empty_like(blocks)
+    for r in range(nblk):
+        out[r, (c0 + pr[r]) % ncells] = blocks[r]
+    return out
+
+
+def gate_cell_interleaver(verbose=True):
+    """The spec's own printed vector, plus C_0 must be a permutation."""
+    want = [0, 8192, 4096, 2048, 10240, 6144, 1024, 9216]
+    got = list(cell_shift(10800, 8))
+    ok_p = got == want
+    if verbose:
+        print(f"  P(r) N_cells=10800 Nd=14 -> {got}")
+        print(f"    spec 7.1.5.2 printed  {want}   "
+              f"{'PASS' if ok_p else '*** FAIL ***'}")
+    ok_c = True
+    for n in (8100, 10800, 5400, 16200):
+        try:
+            c0 = cell_basic_permutation(n)
+        except ValueError as e:
+            if verbose:
+                print(f"  C_0 N_cells={n:6d}  skipped ({e})")
+            continue
+        bij = (len(c0) == n and len(np.unique(c0)) == n
+               and c0.min() == 0 and c0.max() == n - 1)
+        ok_c &= bij
+        if verbose:
+            print(f"  C_0 N_cells={n:6d}  bijection over [0,{n})  "
+                  f"{'PASS' if bij else '*** FAIL ***'}")
+    # round trip: de-interleaving an interleaved block returns it
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((5, 8100)) + 1j * rng.standard_normal((5, 8100))
+    c0, pr = cell_basic_permutation(8100), cell_shift(8100, 5)
+    tx = np.stack([x[r][(c0 + pr[r]) % 8100] for r in range(5)])
+    rt = bool(np.allclose(cell_deinterleave(tx), x))
+    if verbose:
+        print(f"  round trip interleave -> deinterleave        "
+              f"{'PASS' if rt else '*** FAIL ***'}")
+    return ok_p and ok_c and rt
+
+
+if __name__ == "__main__" and "--ci" in sys.argv:
+    raise SystemExit(0 if gate_cell_interleaver() else 1)

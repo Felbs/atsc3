@@ -302,37 +302,53 @@ def common_cps(nfft, cred):
 _GEO = {}
 
 
-def _geometry(l, sbs):
-    hit = _GEO.get((l, sbs))
+def _geometry(l, sbs, gx=None):
+    """Per-symbol pilot/data geometry, cached.
+
+    `gx` is an m6_cells.Geom; None means the RF33 module constants, which is
+    what every caller meant before multiplexes other than RF33 existed here.
+    THE CACHE KEY INCLUDES THE GEOMETRY: it used to be (l, sbs) alone, so
+    handing this a second multiplex would have returned the first one's pilot
+    positions with no error anywhere -- the quietest possible way to decode
+    noise.
+    """
+    import m6_cells as MC
+    if gx is None:
+        gx = MC.Geom.rf33()
+    hit = _GEO.get((gx.key, l, sbs))
     if hit is not None:
         return hit
     import m3_spec as S3
-    import m6_cells as MC
     import spec_pilots as P
     from m3_preamble import fft_bins
-    noc = P.NOC[(MC.NFFT, MC.CRED)]
-    lo, _ = S3.carrier_abs_range(MC.NFFT, MC.CRED)
+    noc = P.NOC[(gx.nfft, gx.cred)]
+    lo, _ = S3.carrier_abs_range(gx.nfft, gx.cred)
     ref = np.asarray(S3.pilot_values(noc, 1.0))
-    dx, dy = P.dxdy(MC.PATTERN)
+    dx, dy = P.dxdy(gx.pattern)
     pk = (np.arange(0, noc, dx) if sbs
           else np.arange(dx * (l % dy), noc, dx * dy))
     pk = np.unique(np.concatenate([pk, [0, noc - 1]]))
     used = np.zeros(noc, bool)
-    used[np.array(sorted(P.pilot_carriers(MC.NFFT, MC.CRED, MC.PATTERN, l,
+    used[np.array(sorted(P.pilot_carriers(gx.nfft, gx.cred, gx.pattern, l,
                                           sbs)), int)] = True
     d = np.flatnonzero(~used)
-    _GEO[(l, sbs)] = g = dict(
-        pk=pk, refpk=ref[pk], bins_pk=fft_bins(MC.NFFT, lo + pk),
-        d=d, bins_d=fft_bins(MC.NFFT, lo + d), kk=np.arange(noc),
-        step=MC.NFFT + MC.GI, gi=MC.GI, nfft=MC.NFFT)
+    _GEO[(gx.key, l, sbs)] = g = dict(
+        pk=pk, refpk=ref[pk], bins_pk=fft_bins(gx.nfft, lo + pk),
+        d=d, bins_d=fft_bins(gx.nfft, lo + d), kk=np.arange(noc),
+        step=gx.nfft + gx.gi, gi=gx.gi, nfft=gx.nfft,
+        # Where the DATA symbols start.  Was implicit in "step * (1 + l)",
+        # i.e. exactly ONE Preamble symbol of DATA size.  RF33 sends one,
+        # so data_off == step there and this is the same arithmetic; a
+        # multiplex with NP = 2 needs the real offset.
+        data_off=(gx.pre_nfft + gx.pre_gi) * gx.np_sym)
     return g
 
 
-def demod_data(y, t0, l, sbs):
+def demod_data(y, t0, l, sbs, gx=None):
     """m6_cells.demod_data with the per-symbol geometry cached."""
     import m6_cells as MC
-    g = _geometry(l, sbs)
-    s = t0 + g["step"] * (1 + l) + g["gi"]
+    g = _geometry(l, sbs, gx)
+    s = t0 + g["data_off"] + g["step"] * l + g["gi"]
     Y = np.fft.fftshift(np.fft.fft(y[s:s + g["nfft"]]))
     hp = Y[g["bins_pk"]] / g["refpk"]
     H = MC._interp(g["kk"], g["pk"], hp)
@@ -342,7 +358,7 @@ def demod_data(y, t0, l, sbs):
     return z, coh
 
 
-def demod_coh(y, t0, l, sbs=False):
+def demod_coh(y, t0, l, sbs=False, gx=None):
     """The coherence metric of `demod_data`, WITHOUT equalising the data cells.
 
     fine_timing throws `z` away for all 41 candidate offsets and keeps only
@@ -352,15 +368,15 @@ def demod_coh(y, t0, l, sbs=False):
     not re-derived), so the value is bit-identical; everything skipped was
     arithmetic whose result was unused.  E52.
     """
-    g = _geometry(l, sbs)
-    s = t0 + g["step"] * (1 + l) + g["gi"]
+    g = _geometry(l, sbs, gx)
+    s = t0 + g["data_off"] + g["step"] * l + g["gi"]
     Y = np.fft.fftshift(np.fft.fft(y[s:s + g["nfft"]]))
     hp = Y[g["bins_pk"]] / g["refpk"]
     return float(abs(np.sum(hp[:-1] * np.conj(hp[1:])))
                  / max(np.sum(np.abs(hp) ** 2), 1e-30))
 
 
-def demod_coh_batch(y, cands, l=1, sbs=False):
+def demod_coh_batch(y, cands, l=1, sbs=False, gx=None):
     """`demod_coh` for a run of CONSECUTIVE candidate offsets, one batched FFT.
 
     fine_timing's 41 candidates differ by one sample each, so their FFT
@@ -371,9 +387,9 @@ def demod_coh_batch(y, cands, l=1, sbs=False):
     BIT EQUALITY against the scalar `demod_coh` on real air -- this is an
     exactness claim, gated, not assumed.
     """
-    g = _geometry(l, sbs)
+    g = _geometry(l, sbs, gx)
     cands = np.asarray(cands)
-    s0 = int(cands[0]) + g["step"] * (1 + l) + g["gi"]
+    s0 = int(cands[0]) + g["data_off"] + g["step"] * l + g["gi"]
     base = y[s0:]
     W = np.lib.stride_tricks.as_strided(
         base, shape=(len(cands), g["nfft"]),

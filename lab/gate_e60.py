@@ -37,6 +37,10 @@ Legs:
      (e60_fox.py) reproduces E58's 1056 blocks, all BCH-zero, on E49's
      8697-job list.  Skipped with a warning while the background run is
      still in flight.
+  8  residual-CFO phase ramp (9/21, found live): a common phase ramp of up to
+     two full turns across the Frame.  DEFAULT (de-rotate before the frame
+     mean) must hold the per-symbol path's count; the OLD build (ce_derot=0)
+     must lose the full-turn case, or the leg is vacuous and FAILS.
   7  switch engagement: AWGN added to a strong frame until the dummy-SNR
      sits below the gate -- the auto-switch must ENGAGE (n_wllr_frames = 1)
      and the weighted decode must not lose blocks against the plain decode
@@ -257,6 +261,60 @@ def leg4(state):
     return ok
 
 
+def leg8(state):
+    """Residual carrier offset: a common phase RAMP across the Frame.
+
+    Found on live RF33 air 9/21: ~10 deg/symbol as the tuner drifted, ~350 deg
+    over the 35 symbols.  The per-symbol path does not care (each symbol is
+    equalised by its own pilots).  The smoothed path fitted every symbol onto
+    the frame-MEAN of the raw pilots -- a phasor that has gone once round
+    averages to ~nothing, and differently on the two pilot parities -- and
+    decoded 0/74 from Frames with perfect dummy cells, 108 in a row.  The
+    DEFAULT build (de-rotate, then average) must hold the raw path's count at
+    every rotation; the OLD build (ce_derot=0) must LOSE the full-turn case or
+    this leg is vacuous.
+    """
+    import m6_cells as C
+    m9_fast, M16, y, t0, fd_off = state
+    step = C.NFFT + C.GI
+    mk = lambda derot: m9_fast.FrameDecoder(                    # noqa: E731
+        threads=6, backend="cpu", cpu_fast=True,
+        margin=dict(ce_w=12, wllr="off", sp=0, ce_derot=derot))
+    fd_def, fd_old = mk(1), mk(0)
+    for fd in (fd_def, fd_old):
+        fd.prewarm()
+
+    def ramp(total_deg):
+        yf = y.copy()
+        d = np.deg2rad(total_deg) / 35.0
+        for l in range(35):
+            s = t0 + step * (1 + l)
+            yf[s:s + step] = y[s:s + step] * np.exp(1j * d * l)
+        return yf
+
+    ok, old_lost = True, False
+    for total in (90, 180, 350, 700):
+        yf = ramp(total)
+        _, _, dg_raw = fd_off.decode_frame(yf, t0)
+        rep = {}
+        _, _, dg_def = fd_def.decode_frame(yf, t0, rep)
+        _, _, dg_old = fd_old.decode_frame(yf, t0)
+        good = dg_def["converged"] >= dg_raw["converged"] - 1
+        ok &= good
+        old_lost |= dg_old["converged"] <= dg_raw["converged"] - 3
+        print(f"  [8] phase ramp {total:3d} deg over the Frame: raw "
+              f"{dg_raw['converged']}/74, DEFAULT {dg_def['converged']}/74 "
+              f"(fell_back {rep.get('fell_back')}/35), OLD no-derotation "
+              f"{dg_old['converged']}/74  {PASS if good else FAIL}")
+    ok &= old_lost
+    print(f"  [8] control: the OLD build "
+          f"{'LOST blocks as required' if old_lost else 'held -- vacuous'}"
+          f"  {PASS if old_lost else FAIL}")
+    fd_def.close()
+    fd_old.close()
+    return ok
+
+
 def leg5():
     import m6_bicm as B
     import m16_margin as M16
@@ -374,6 +432,7 @@ def main():
     ok &= bool(leg2(state))
     ok &= bool(leg3())
     ok &= bool(leg4(state))
+    ok &= bool(leg8(state))
     ok &= bool(leg7(state))
     state[4].close()
     ok &= bool(leg5())

@@ -27,6 +27,7 @@ aligned, and it is checked here rather than assumed.
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 import numpy as np
@@ -51,9 +52,9 @@ PREAMBLE_DX = 4
 L1B_CELLS, L1D_CELLS = 484, 880
 
 PLP0 = dict(start=0, size=199800, mod="64QAM", rate="11/15", ninner=16200,
-            nti=2, n_fec=74, n_fec_max=74)
+            nti=2, n_fec=74, n_fec_max=74, cell_interleaver=0)
 PLP16 = dict(start=199800, size=8100, mod="QPSK", rate="2/15", ninner=16200,
-             nti=1, n_fec=1, n_fec_max=1)
+             nti=1, n_fec=1, n_fec_max=1, cell_interleaver=0)
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +66,16 @@ def _interp(kk, pk, hp):
             + 1j * np.interp(kk, pk, hp.imag))
 
 
-def demod_data(y, t0, l, sbs):
-    """Equalised data cells of DATA symbol l of subframe 0, in CARRIER order."""
+def demod_data(y, t0, l, sbs, gx=None):
+    """Equalised data cells of DATA symbol l of subframe 0, in CARRIER order.
+
+    `gx` is a Geom; None keeps the RF33 module constants this was written
+    against, so existing callers are unchanged.
+    """
+    if gx is not None and gx.g is not None:
+        return _demod_data_g(y, t0, gx.g, l)
+    # Geom.rf33() carries g=None and exactly the constants below, so it takes
+    # this path and is byte-identical to calling with no gx at all.
     noc = P.NOC[(NFFT, CRED)]
     lo, _ = S.carrier_abs_range(NFFT, CRED)
     s = t0 + (NFFT + GI) * (1 + l) + GI
@@ -107,6 +116,142 @@ def demod_preamble(y, t0):
 
 # bootstrap + subframe 0 (36 x 9728) + subframe 1 (75 x 17920), at 6.912 Msps
 FRAME_SAMPLES = 13824 + (8192 + 1536) * 36 + (16384 + 1536) * 75
+
+
+class Geom:
+    """The multiplex geometry m9_fast / m9_accel decode against.
+
+    Those two modules were written for RF33 and read the module constants
+    above directly, so every non-CTI multiplex in the world was decoded as if
+    it were RF33 -- 35 data symbols, 74 FEC Blocks of 64QAM-NUC 11/15.  On a
+    broadcaster configured any other way that returns zero at any SNR, which
+    is what field-site RF8 does (23 symbols, 17 Blocks, QPSK 9/15).
+
+    This bundles the geometry so it can travel as a VALUE instead of being
+    read out of module scope.  `Geom.rf33()` holds exactly the constants above
+    -- so a decoder built without a plan is the old code path, by
+    construction and not by inspection -- and `Geom.from_plan()` derives the
+    same shape from a decoded L1.
+    """
+
+    __slots__ = ("nfft", "gi", "cred", "pattern", "nsym", "sbs_syms",
+                 "l1b_cells", "l1d_cells", "frame_samples", "plp0", "plp16",
+                 "key", "pre_nfft", "pre_gi", "pre_dx", "pre_cred",
+                 "np_sym", "g", "sbs_null")
+
+    def __init__(self, *, nfft, gi, cred, pattern, nsym, sbs_syms,
+                 l1b_cells, l1d_cells, frame_samples, plp0, plp16, key,
+                 pre_nfft=None, pre_gi=None, pre_dx=PREAMBLE_DX,
+                 pre_cred=PREAMBLE_CRED, np_sym=1, g=None, sbs_null=None):
+        self.nfft, self.gi, self.cred = nfft, gi, cred
+        # SBS null cells per boundary symbol.  None = compute from the pilot
+        # pattern (RF33's 127); a plan supplies the count L1 SIGNALS.
+        self.sbs_null = (P.sbs_cells(nfft, cred, pattern, 1)[2]
+                         if sbs_null is None else int(sbs_null))
+        self.pattern, self.nsym = pattern, nsym
+        self.sbs_syms = tuple(sbs_syms)
+        self.l1b_cells, self.l1d_cells = l1b_cells, l1d_cells
+        self.frame_samples = frame_samples
+        self.plp0, self.plp16 = plp0, plp16
+        self.key = key
+        # A/322 allows 1..4 Preamble symbols.  m9_fast was written for the
+        # one RF33 sends, so the data symbols were addressed as if exactly
+        # one Preamble symbol of DATA size preceded them and only the first
+        # carried spare cells.  Both are wrong at NP > 1.
+        self.pre_nfft = nfft if pre_nfft is None else pre_nfft
+        self.pre_gi = gi if pre_gi is None else pre_gi
+        self.pre_dx, self.pre_cred = pre_dx, pre_cred
+        self.np_sym = np_sym
+        self.g = g
+
+    @classmethod
+    def rf33(cls):
+        """The module constants, unchanged.  The default for every caller."""
+        return cls(nfft=NFFT, gi=GI, cred=CRED, pattern=PATTERN, nsym=NSYM,
+                   sbs_syms=SBS_SYMS, l1b_cells=L1B_CELLS,
+                   l1d_cells=L1D_CELLS, frame_samples=FRAME_SAMPLES,
+                   plp0=PLP0, plp16=PLP16, key="rf33",
+                   pre_nfft=NFFT, pre_gi=GI, pre_dx=PREAMBLE_DX,
+                   pre_cred=PREAMBLE_CRED, np_sym=1, g=None)
+
+    @classmethod
+    def from_plan(cls, plan):
+        """Derive from an m44_ldm.LdmPlan, i.e. from L1 and nothing else."""
+        g, core = plan.g, plan.core
+        if core.get("sub", 0) != 0:
+            raise ValueError(
+                "core PLP is in subframe %d; m9_fast decodes subframe 0"
+                % core.get("sub", 0))
+        n_fec = int(core["size"] // core["cells_per_fec"])
+        sig = core.get("n_fec_signalled")
+        if sig is not None and sig != n_fec:
+            raise ValueError(
+                "L1 disagrees with itself: plp_size implies %d FEC Blocks, "
+                "HTI_num_fec_blocks signals %d" % (n_fec, sig))
+        plp0 = dict(start=core["start"], size=core["size"], mod=core["mod"],
+                    rate=core["rate"], ninner=core["ninner"],
+                    nti=core.get("nti") or 1, n_fec=n_fec,
+                    n_fec_max=core.get("n_fec_max") or n_fec,
+                    # A/322 7.1.5.2, optional and signalled per PLP.
+                    # RF33 sends 0, so the stage was never written.
+                    cell_interleaver=int(
+                        core.get("hti_cell_interleaver") or 0))
+        # Any OTHER layer-0 PLP of subframe 0 sits after the core in the pool
+        # -- RF33's PLP16 is that, one small QPSK signalling Block.  A
+        # multiplex with only one PLP in subframe 0 (RF8) gets None, and the
+        # decoder skips the second chain instead of decoding 8100 cells of
+        # dummy as if they were a PLP.
+        others = [p for p in g.plps
+                  if p.get("sub", 0) == 0 and p["layer"] == 0
+                  and p["id"] != core["id"]]
+        plp16 = None
+        if others:
+            o = min(others, key=lambda p: p["size"])
+            plp16 = dict(start=o["start"], size=o["size"], mod=o["mod"],
+                         rate=o["rate"], ninner=o["ninner"],
+                         nti=o.get("nti") or 1,
+                         n_fec=int(o["size"] // o["cells_per_fec"]),
+                         n_fec_max=o.get("n_fec_max") or 1)
+        return cls(nfft=g.nfft, gi=g.gi, cred=g.cred, pattern=g.pattern,
+                   nsym=g.nsym, sbs_syms=tuple(
+                       l for l in range(g.nsym) if g.is_sbs(l)),
+                   l1b_cells=g.l1b_cells, l1d_cells=g.l1d_cells,
+                   frame_samples=plan.frame_samples, plp0=plp0, plp16=plp16,
+                   key=("l1", g.nfft, g.gi, g.cred, g.pattern, g.nsym,
+                        g.pre_nfft, g.pre_gi, g.pre_cred, g.np_sym,
+                        plp0["size"], plp0["mod"], plp0["rate"],
+                        None if plp16 is None else plp16["size"]),
+                   pre_nfft=g.pre_nfft, pre_gi=g.pre_gi, pre_dx=g.pre_dx,
+                   pre_cred=g.pre_cred, np_sym=g.np_sym, g=g,
+                   sbs_null=g.n_null)
+
+    @property
+    def data_off(self):
+        """Samples from Frame start (post-bootstrap t0) to the DATA symbols."""
+        return (self.pre_nfft + self.pre_gi) * self.np_sym
+
+    @property
+    def dummy_start(self):
+        """Pool index where the A/322 7.2.6.5 dummy cells begin.
+
+        Everything before it belongs to a PLP; everything after is the known
+        +-1 sequence the SNR estimator and the pool check both read.  One
+        definition, because a multiplex with no second PLP puts the boundary
+        right after the core and three call sites had it written out longhand.
+        """
+        last = self.plp16 if self.plp16 is not None else self.plp0
+        return last["start"] + last["size"]
+
+    def describe(self):
+        p16 = ("none" if self.plp16 is None
+               else f"{self.plp16['size']} cells {self.plp16['mod']} "
+                    f"{self.plp16['rate']}")
+        return (f"FFT {self.nfft // 1024}K GI {self.gi} Cred {self.cred} "
+                f"{self.pattern} {self.nsym} data symbols, SBS "
+                f"{list(self.sbs_syms)} | core {self.plp0['size']} cells "
+                f"{self.plp0['mod']} {self.plp0['rate']} "
+                f"{self.plp0['n_fec']} Blocks nti {self.plp0['nti']} "
+                f"| second PLP {p16}")
 
 
 def fine_timing(y, span=20, centre=None):
@@ -165,8 +310,13 @@ def constellation_regions(pool_len, plp0=PLP0, plp16=PLP16):
     """
     reg = np.full(pool_len, 2, np.int8)
     reg[plp0["start"]:plp0["start"] + plp0["size"]] = 0
-    reg[plp16["start"]:plp16["start"] + plp16["size"]] = 1
-    dstart = plp16["start"] + plp16["size"]
+    if plp16 is None:
+        # One PLP in this Subframe: everything past the core is dummy, and
+        # there is no region 1 for a caller's alphabet list to index.
+        dstart = plp0["start"] + plp0["size"]
+    else:
+        reg[plp16["start"]:plp16["start"] + plp16["size"]] = 1
+        dstart = plp16["start"] + plp16["size"]
     dv = np.zeros(pool_len, complex)
     if pool_len > dstart:
         dv[dstart:] = (1.0 - 2.0 * SC.sequence(pool_len)[dstart:pool_len])
@@ -261,7 +411,7 @@ class Geometry:
     def __init__(self, *, nfft, gi, cred, pattern, nsym, sbs_first, sbs_last,
                  np_sym, pre_nfft, pre_gi, pre_dx, pre_cred, l1b_cells,
                  l1d_cells, freq_interleaver, plps, sbs_null_signalled=None,
-                 label=""):
+                 label="", subframes=None):
         self.nfft, self.gi, self.cred, self.pattern = nfft, gi, cred, pattern
         self.nsym = nsym
         self.sbs_first, self.sbs_last = bool(sbs_first), bool(sbs_last)
@@ -273,11 +423,39 @@ class Geometry:
         self.plps = plps
         self.sbs_null_signalled = sbs_null_signalled
         self.label = label
+        # A/322 allows a Frame to carry SEVERAL Subframes, each with its own
+        # FFT / GI / symbol count.  THIS object is one Subframe -- Subframe 0,
+        # the one L1B_first_sub_* describes -- and `pool_size` below is its
+        # pool alone.  `subframes` records (nfft, gi, nsym) for EVERY Subframe
+        # in the Frame, because Frame LENGTH is the one quantity that needs
+        # all of them, and a Frame length short by a Subframe puts the next
+        # Frame's bootstrap in the wrong place.  Single-Subframe multiplexes
+        # get a one-entry list and behave exactly as before.
+        self.subframes = list(subframes) if subframes else [
+            dict(nfft=self.nfft, gi=self.gi, nsym=self.nsym)]
         # --- derived, from spec_pilots (M5's gated tables) -----------------
         self.n_normal = P.data_cells(nfft, cred, pattern, 1, False)
         tot, act, nnull = P.sbs_cells(nfft, cred, pattern, 1)
+        # 9/09 -- THE 190-CELL DEFICIT.  This trusted the null count COMPUTED
+        # from the pilot pattern (127 for SP4_2 at 8K) and trimmed it from
+        # every SBS symbol.  field-site RF8 SIGNALS L1D_sbs_null_cells = 0:
+        # the transmitter put DATA in those cells, so trimming them deleted
+        # 127 real cells from symbol 0 and 63 from the low edge of symbol 22
+        # -- 190 cells ahead of the dummy tail, exactly the shift the tail
+        # measured.  The [P2] gate below has always printed the mismatch; it
+        # just never changed anything.  The AIR is the authority: when L1
+        # signals a count, use it, and keep the computed one as the check.
+        self.n_null_computed = nnull
+        if sbs_null_signalled is not None and int(sbs_null_signalled) != nnull:
+            nnull = int(sbs_null_signalled)
+            act = tot - nnull
         self.n_sbs_total, self.n_sbs_active, self.n_null = tot, act, nnull
         self.null_low, self.null_high = P.sbs_null_split(nnull)
+
+    def data_samples(self):
+        """Samples of DATA symbols in the Frame, summed over every Subframe."""
+        return int(sum((s["nfft"] + s["gi"]) * s["nsym"]
+                       for s in self.subframes))
 
     # -- symbol classification ------------------------------------------
     def is_sbs(self, l):
@@ -323,20 +501,52 @@ class Geometry:
         """
         f = {}
         plps, cur, sub = [], None, {}
+        # Per-Subframe fields, keyed by the `i=<n>/` the L1-Detail parser
+        # stamps on every field's path.  The old walk sent EVERY field after
+        # the first L1D_plp_id into the current PLP, so on a multi-Subframe
+        # multiplex Subframe 1's own geometry (fft_size, num_ofdm_symbols,
+        # ...) was silently glued onto the last PLP of Subframe 0 and its
+        # PLPs were appended to one flat list.  Only `L1D_plp_*` belongs to a
+        # PLP; everything else belongs to a Subframe, or to the Frame.
+        subs = {}
         for e in l1d_fields:
-            n = e["name"] if isinstance(e, dict) else e[1]
-            v = e["value"] if isinstance(e, dict) else e[2]
+            if isinstance(e, dict):
+                path, n, v = e.get("path", ""), e["name"], e["value"]
+            else:
+                path, n, v = e[0], e[1], e[2]
+            m = re.match(r"i=(\d+)", str(path or ""))
+            i_sub = int(m.group(1)) if m else None
             if n == "L1D_plp_id":
                 if cur:
                     plps.append(cur)
-                cur = {"id": v}
-            elif cur is not None:
+                cur = {"id": v, "sub": i_sub or 0}
+            elif n.startswith("L1D_plp_") and cur is not None:
                 cur[n] = v
+            elif i_sub is not None:
+                subs.setdefault(i_sub, {})[n] = v
             else:
                 sub[n] = v
             f[n] = v
         if cur:
             plps.append(cur)
+        # Subframe 0 is described by L1B_first_sub_*; Subframes 1.. describe
+        # themselves in their own `i>0` block.  Fall back to Subframe 0's
+        # values for anything a Subframe does not restate.
+        sub.update(subs.get(0, {}))
+        sf = [dict(nfft=_FFT_SIZE[l1b["L1B_first_sub_fft_size"]],
+                   gi=_LS.GUARD_INTERVAL_SAMPLES[
+                       l1b["L1B_first_sub_guard_interval"]],
+                   nsym=l1b["L1B_first_sub_num_ofdm_symbols"] + 1)]
+        for i in sorted(k for k in subs if k > 0):
+            d = subs[i]
+            sf.append(dict(
+                nfft=_FFT_SIZE[d.get("L1D_fft_size",
+                                     l1b["L1B_first_sub_fft_size"])],
+                gi=_LS.GUARD_INTERVAL_SAMPLES[
+                    d.get("L1D_guard_interval",
+                          l1b["L1B_first_sub_guard_interval"])],
+                nsym=d.get("L1D_num_ofdm_symbols",
+                           l1b["L1B_first_sub_num_ofdm_symbols"]) + 1))
         core = {}
         out = []
         for p in plps:
@@ -344,7 +554,8 @@ class Geometry:
             if p.get("L1D_plp_layer", 0) == 0 and "L1D_plp_CTI_depth" in p:
                 core = p
             out.append(dict(
-                id=p["id"], layer=p.get("L1D_plp_layer", 0),
+                id=p["id"], sub=p.get("sub", 0),
+                layer=p.get("L1D_plp_layer", 0),
                 lls=bool(p.get("L1D_plp_lls_flag", 0)),
                 start=p["L1D_plp_start"], size=p["L1D_plp_size"],
                 mod=mod, rate=_RATE_NAME[p["L1D_plp_cod"]],
@@ -360,7 +571,26 @@ class Geometry:
                 cti_extended=p.get("L1D_plp_TI_extended_interleaving",
                                    core.get("L1D_plp_TI_extended_interleaving",
                                             0)),
-                ldm_injection=p.get("L1D_plp_ldm_injection_level")))
+                ldm_injection=p.get("L1D_plp_ldm_injection_level"),
+                # HTI (TI mode 2) parameters.  These were never extracted, so
+                # every HTI multiplex had to borrow RF33's module constants.
+                # A/331 signals all three as "value + 1".  `n_fec` is DERIVED
+                # from the closed identity size == n_fec * cells_per_fec and
+                # the signalled field is kept beside it as a cross-check --
+                # a derived number that disagrees with the air is a fault
+                # worth seeing, not a number to silently prefer.
+                hti_inter_subframe=p.get("L1D_plp_HTI_inter_subframe"),
+                hti_cell_interleaver=p.get("L1D_plp_HTI_cell_interleaver"),
+                nti=(p["L1D_plp_HTI_num_ti_blocks"] + 1
+                     if "L1D_plp_HTI_num_ti_blocks" in p else None),
+                n_fec_signalled=(p["L1D_plp_HTI_num_fec_blocks"] + 1
+                                 if "L1D_plp_HTI_num_fec_blocks" in p
+                                 else None),
+                n_fec_max=(p["L1D_plp_HTI_num_fec_blocks_max"] + 1
+                           if "L1D_plp_HTI_num_fec_blocks_max" in p
+                           else None),
+                n_fec=p["L1D_plp_size"] // ((64800 if p["L1D_plp_fec_type"]
+                                             else 16200) // _MOD_BITS[mod])))
         return cls(
             nfft=_FFT_SIZE[l1b["L1B_first_sub_fft_size"]],
             gi=_LS.GUARD_INTERVAL_SAMPLES[l1b["L1B_first_sub_guard_interval"]],
@@ -376,7 +606,7 @@ class Geometry:
             l1d_cells=l1b["L1B_L1_Detail_total_cells"],
             freq_interleaver=sub.get("L1D_frequency_interleaver", 1),
             sbs_null_signalled=sub.get("L1D_sbs_null_cells"),
-            plps=out, label=label)
+            plps=out, label=label, subframes=sf)
 
     @classmethod
     def rf33_legacy(cls):

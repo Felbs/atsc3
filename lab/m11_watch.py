@@ -64,6 +64,29 @@ except Exception:                                                 # noqa: BLE001
 FRAME_SEC = ST.FRAME_SEC
 
 
+def _retune_tracker(fe, plan):
+    """Give the front end's timing tracker the Frame ADVANCE L1 signals --
+    and only that.
+
+    9/10: the m9_fast path handed the front end no plan, so the tracker
+    dead-reckoned every Frame by RF33's FRAME_SAMPLES -- 256 samples per
+    Frame wrong on field-site RF8 against a +-20 fine-timing window.  Nothing
+    could hold; the weak-Frame bootstrap re-acquire (43 per run) was doing the
+    timing by brute force, and "hold the lock" collapsed to 57 Blocks.
+
+    `FrontEnd.adopt_plan` is NOT the fix here: it also takes the plan's
+    `frame_window`, which spans the WHOLE Frame (both Subframes, what the LDM
+    decoder consumes -- 1,711,912 samples on RF8) while this path's shared
+    slots hold Subframe 0 only (358,440).  Adopting it broadcast a window into
+    a slot that could not hold it and decoded zero Frames.  So: advance from
+    the plan, window untouched.
+    """
+    fe.frame_samples = plan.frame_samples
+    fe.ft.plan = plan
+    fe.ft.frame_samples = plan.frame_samples
+    fe.ft.reset()
+
+
 def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
     """One decode worker PROCESS (E52).
 
@@ -87,9 +110,13 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
         shm = shared_memory.SharedMemory(name=shm_name)
         buf = np.ndarray((nslots, slot_len), dtype=np.complex128,
                          buffer=shm.buf)
+        plan = None
+        if cfg.get("plan_spec"):
+            import m44_ldm as _M44
+            plan = _M44.LdmPlan.from_spec(cfg["plan_spec"])
         fd = m9_fast.FrameDecoder(threads=cfg["threads"], backend="cpu",
                                   iters=cfg["iters"],
-                                  cpu_fast=cfg["cpu_fast"])
+                                  cpu_fast=cfg["cpu_fast"], plan=plan)
         fd.prewarm()
         out_q.put(("ready", os.getpid()))
         while True:
@@ -176,6 +203,18 @@ class Watch:
         self.pipe = None
         self.frame_sec = FRAME_SEC
         self.blocks_per_frame = 74
+
+    def _min_blocks(self):
+        """"Weak Frame" threshold, as a FRACTION of this multiplex.
+
+        `--min-blocks` defaults to 60, which was 60 of RF33's 74 (81%).
+        Held at 60 against a multiplex whose Frame carries 17 Blocks it can
+        never be met, so every Frame is "weak" and the front end re-acquires
+        forever -- field-site RF8 re-acquired 26 times in 200 Frames.
+        Scale it, and keep RF33 at exactly 60.
+        """
+        return min(self.a.min_blocks,
+                   int(round(0.81 * self.blocks_per_frame)))
 
     def _put_blocking(self, q, item):
         """Backpressure put for lossless replay: wait for the consumer, but
@@ -302,7 +341,9 @@ class Watch:
         self.d_in = ctx.Queue()
         self.d_out = ctx.Queue()
         cfg = dict(threads=a.threads, iters=a.iters,
-                   cpu_fast=(a.accel == "cpu" and not a.exact_cpu))
+                   cpu_fast=(a.accel == "cpu" and not a.exact_cpu),
+                   plan_spec=(self.m9_plan.to_spec()
+                              if getattr(self, "m9_plan", None) else None))
         self.procs = [ctx.Process(
             target=_decode_proc_main,
             args=(self.shm.name, self.nslots, self.slot_len, self.d_in,
@@ -579,7 +620,7 @@ class Watch:
             self.n_bch += diag["bch_ok"]
             self.hist.append((time.time(), dt_, diag["converged"],
                               float(coh)))
-        if diag["converged"] < self.a.min_blocks:
+        if diag["converged"] < self._min_blocks():
             self.bad_run += 1
             self.stats["weak_frame"] += 1
             # E53: a weak Frame is the timing tracker's REAL guard (the
@@ -591,7 +632,8 @@ class Watch:
                 pass
             if self.bad_run >= self.a.bad_run:
                 ST.log(f"  *** {self.bad_run} consecutive Frames under "
-                       f"{self.a.min_blocks}/74 FEC Blocks -- "
+                       f"{self._min_blocks()}/"
+                       f"{int(round(self.blocks_per_frame))} FEC Blocks -- "
                        f"re-acquiring ***")
                 self.bad_run = 0
                 self.fe.reacquire()
@@ -739,6 +781,18 @@ class Watch:
         if not plan.uses_cti:
             ST.log("  L1 signals the HYBRID time interleaver -- m9_fast owns "
                    "this multiplex; the LDM path stands down")
+            # ...but m9_fast used to decode whatever it was handed AS RF33.
+            # Give it the geometry L1 just told us, so "m9_fast owns this"
+            # means the real multiplex and not the one this module was
+            # written against.
+            self.m9_plan = plan
+            self.frame_sec = plan.frame_sec
+            self.blocks_per_frame = plan.plp_size / plan.ncell
+            # If the front end already exists, retune its tracker now --
+            # the same call the LDM path relies on (m11_stream.adopt_plan).
+            fe = getattr(self, "fe", None)
+            if fe is not None:
+                _retune_tracker(fe, plan)
             return blocks
         if getattr(self.a, "ldm", "auto") == "off":
             return blocks
@@ -803,9 +857,18 @@ class Watch:
                 ST.log(f"  multiplex sniff FAILED ({type(e).__name__}: {e}) "
                        f"-- taking the m9_fast path\n"
                        f"{traceback.format_exc()}")
+        # 9/10 -- the m9_fast path handed the front end NO plan, so its
+        # timing tracker dead-reckoned every Frame by RF33's FRAME_SAMPLES:
+        # 256 samples per Frame wrong on field-site RF8 against a +-20
+        # fine-timing window.  Nothing could hold; the weak-Frame gate's
+        # bootstrap re-acquire (43 per run) was doing all the timing work by
+        # brute force, and "hold the lock" collapsed to 57 Blocks.  Whichever
+        # decoder owns the multiplex, the tracker gets the Frame L1 signals.
         self.fe = ST.FrontEnd(rate, ex=self.ex,
                               fast=(a.accel == "cpu" and not a.exact_cpu),
                               plan=self.plan if self.ldm else None)
+        if not self.ldm and getattr(self, "m9_plan", None) is not None:
+            _retune_tracker(self.fe, self.m9_plan)
         if not self.fe.rs.bypass:
             ST.log(f"  resampler ACTIVE: {rate/1e6:g} -> "
                    f"{ST.FS_POST/1e6:g} Msps (up={self.fe.rs.up} "
@@ -860,7 +923,8 @@ class Watch:
             self.fd = m9_fast.FrameDecoder(threads=a.threads, backend=a.accel,
                                            iters=a.iters,
                                            cpu_fast=(a.accel == "cpu"
-                                                     and not a.exact_cpu))
+                                                     and not a.exact_cpu),
+                                           plan=getattr(self, "m9_plan", None))
             t_warm = time.time()
             self.fd.prewarm()
             ST.log(f"  decoder prewarmed in {time.time() - t_warm:.2f} s "
@@ -1008,7 +1072,8 @@ class Watch:
             # number assembled from two clocks is a wrong number.
             fec_converged=(self.pipe.n_conv if self.ldm else self.n_conv),
             fec_total=(self.pipe.n_blocks if self.ldm
-                       else 74 * self.n_frames),
+                       else int(round(self.blocks_per_frame))
+                       * self.n_frames),
             bch_zero=(self.pipe.n_bch if self.ldm else self.n_bch),
             front_end=dict(self.fe.stats), source=dict(self.src.stats),
             alp=dict(self.tr.walker.stats), ip=dict(self.tr.ip.stats),

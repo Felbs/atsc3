@@ -176,9 +176,14 @@ class LdmPlan:
         self.ncell = core["cells_per_fec"]
         self.plp_size = core["size"]
         self.plp_start = core["start"]
+        # Every Subframe's data symbols, not just Subframe 0's.  A Frame that
+        # carries two Subframes is longer than Subframe 0 alone, and a Frame
+        # length short by a Subframe puts the next Frame's bootstrap in the
+        # wrong place.  Single-Subframe multiplexes are unaffected:
+        # `data_samples()` is then exactly (nfft + gi) * nsym.
         self.frame_samples = int(BOOTSTRAP
                                  + (g.pre_nfft + g.pre_gi) * g.np_sym
-                                 + (g.nfft + g.gi) * g.nsym)
+                                 + g.data_samples())
         self.frame_sec = self.frame_samples / FS_POST
         # A decode window must cover [t0, t0 + frame_samples) plus the fine
         # timing search on each side, plus slack -- the same shape as
@@ -186,9 +191,30 @@ class LdmPlan:
         self.ft_span = 20
         self.frame_window = self.frame_samples + 2 * self.ft_span + 4096
         self.pool_pred = int(g.pool_size(g.preamble_spare()))
+        # `pool_pred` is ONE Subframe's pool (Geometry is one Subframe's cell
+        # map), so the pool identity `pool == sum(plp_size) + dummy` can only
+        # be closed against the PLPs of that SAME Subframe.  Summing every
+        # layer-0 PLP in the Frame charged Subframe 1's PLPs to Subframe 0's
+        # pool: on field-site RF8 that read pool 138213 = core 1312200 +
+        # dummy -1173987 and the chain decoded 400 Frames to 0/29600 without
+        # ever saying anything was wrong.
+        self.core_sub = core.get("sub", 0)
         self.core_total = int(sum(p["size"] for p in g.plps
-                                  if p["layer"] == 0))
+                                  if p["layer"] == 0
+                                  and p.get("sub", 0) == self.core_sub))
         self.dummy_n = self.pool_pred - self.core_total
+        # A negative dummy count is not a number, it is a contradiction: the
+        # PLPs claim more cells than the Subframe has.  m10_core.py:193 has
+        # always called this "*** FAIL: pool < PLP cells ***"; here it used to
+        # be printed as ordinary status and decoded past.  Same invariant,
+        # same consequence -- refuse, and say which Subframe.
+        if self.dummy_n < 0:
+            raise ValueError(
+                f"L1 cell budget impossible for subframe {self.core_sub}: "
+                f"pool {self.pool_pred} < core PLP cells {self.core_total} "
+                f"(dummy {self.dummy_n}). Frame has "
+                f"{len(g.subframes)} subframe(s); PLP subframes "
+                f"{sorted({p.get('sub', 0) for p in g.plps})}.")
         self.is_ldm = any(p["layer"] == 1 for p in g.plps)
         self.mod_bits = BI.MOD_BITS[core["mod"]]
         # the CTI's own reach: an output cell may be fed by an input cell up

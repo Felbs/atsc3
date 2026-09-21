@@ -78,7 +78,7 @@ class MarginCfg:
 
     def __init__(self, ce_w=None, ce_detect=None, wllr=None, snr_gate_db=None,
                  sp=None, sp_ms=None, sp_cut=None, sp_iters=None,
-                 sp_blocks=None, ce_norm=None):
+                 sp_blocks=None, ce_norm=None, ce_derot=None):
         e = os.environ.get
 
         def num(v, key, dflt, cast):
@@ -98,6 +98,11 @@ class MarginCfg:
         # adaptation, gate_e60 leg 4).  ce_norm=0 is the e58-style absolute
         # grid -- kept ONLY as the gate's negative control.
         self.ce_norm = bool(int(num(ce_norm, "ATSC3_CE_NORM", 1, int)))
+        # 9/21: de-rotate each symbol's common phase BEFORE forming the
+        # frame-mean shape the normalisation fits onto.  ce_derot=0 is the
+        # pre-fix behaviour -- kept ONLY as gate_e60 leg 8's negative control
+        # (a residual-CFO phase ramp collapses the un-rotated mean: 0/74).
+        self.ce_derot = bool(int(num(ce_derot, "ATSC3_CE_DEROT", 1, int)))
         # absolute detector: residual vs the symbol's own noise floor.
         # MEASURED (gate capture, complex-norm): clean frames sit at 1-4;
         # a whole-frame-poisoning shape change sits orders of magnitude up.
@@ -118,7 +123,8 @@ class MarginCfg:
 
     def asdict(self):
         return dict(ce_w=self.ce_w, ce_detect=self.ce_detect,
-                    ce_norm=self.ce_norm, ce_abs=self.ce_abs, wllr=self.wllr,
+                    ce_norm=self.ce_norm, ce_derot=self.ce_derot,
+                    ce_abs=self.ce_abs, wllr=self.wllr,
                     snr_gate_db=self.snr_gate_db, sp=self.sp,
                     sp_ms=self.sp_ms, sp_cut=self.sp_cut,
                     sp_iters=self.sp_iters, sp_blocks=self.sp_blocks)

@@ -282,12 +282,29 @@ class FrameDecoder:
     """One PLP-0 + PLP-16 subframe-0 decoder, reusable across Frames."""
 
     def __init__(self, threads=16, backend="gpu", iters=50, ldpc_dtype="float64",
-                 cpu_fast=False, margin=None):
+                 cpu_fast=False, margin=None, plan=None, geom=None):
         m9_accel.install()
         self.ex = ThreadPoolExecutor(max_workers=threads) if threads > 1 else None
         self.threads = threads
-        self.ch16 = B.PlpChain(16200, "QPSK", "2/15", iters=iters)
-        self.ch0 = B.PlpChain(16200, "64QAM", "11/15", iters=iters)
+        # THE MULTIPLEX THIS DECODER IS FOR.  Everything below used to be
+        # RF33's, written as literals, so this class decoded every non-CTI
+        # multiplex in the world as if it were RF33 -- 35 symbols, 74 Blocks
+        # of 64QAM-NUC 11/15 -- and returned 0 Blocks at any SNR on a
+        # broadcaster configured otherwise.  `geom`/`plan` supply the real
+        # one; NEITHER given is exactly the old path, because Geom.rf33() IS
+        # those literals.  There is no RF33 capture in the tree to gate that
+        # path, so it is preserved by construction rather than by test.
+        if geom is not None:
+            self.gx = geom
+        elif plan is not None:
+            self.gx = C.Geom.from_plan(plan)
+        else:
+            self.gx = C.Geom.rf33()
+        p0, p16 = self.gx.plp0, self.gx.plp16
+        self.ch0 = B.PlpChain(p0["ninner"], p0["mod"], p0["rate"],
+                              iters=iters)
+        self.ch16 = (B.PlpChain(p16["ninner"], p16["mod"], p16["rate"],
+                                iters=iters) if p16 else None)
         self.iters = iters
         self.backend = backend
         # E52 -- the CPU fast mode.  cpu_fast=False is the HEAD-exact float64
@@ -317,14 +334,15 @@ class FrameDecoder:
             if not m9_gpu.available():
                 self.backend = "cpu"
             else:
-                self.g0 = m9_gpu.GpuMinSum(self.ch0.checks, 16200, iters=iters,
-                                           dtype=ldpc_dtype)
-                self.g16 = m9_gpu.GpuMinSum(self.ch16.checks, 16200,
-                                            iters=iters, dtype=ldpc_dtype)
-        self.pts0 = B.points_for("64QAM", "11/15")
-        self.pts16 = B.QPSK_POINTS
-        self.ones0 = B.bit_masks(BI.MOD_BITS["64QAM"])
-        self.ones16 = B.bit_masks(BI.MOD_BITS["QPSK"])
+                self.g0 = m9_gpu.GpuMinSum(self.ch0.checks, p0["ninner"],
+                                           iters=iters, dtype=ldpc_dtype)
+                self.g16 = (m9_gpu.GpuMinSum(self.ch16.checks, p16["ninner"],
+                                             iters=iters, dtype=ldpc_dtype)
+                            if p16 else None)
+        self.pts0 = B.points_for(p0["mod"], p0["rate"])
+        self.ones0 = B.bit_masks(BI.MOD_BITS[p0["mod"]])
+        self.pts16 = B.points_for(p16["mod"], p16["rate"]) if p16 else None
+        self.ones16 = B.bit_masks(BI.MOD_BITS[p16["mod"]]) if p16 else None
         self.regions = {}
         self.tm = collections.Counter()
         self._tm_lock = threading.Lock()   # two decode workers share this fd
@@ -342,12 +360,12 @@ class FrameDecoder:
         decode output depends on WHEN a pure function was first called.
         """
         import m4_scrambler as SC4
-        for l in range(C.NSYM):
-            m9_accel._geometry(l, l in C.SBS_SYMS)
-            m9_accel._geometry(l, False)
+        for l in range(self.gx.nsym):
+            m9_accel._geometry(l, l in self.gx.sbs_syms, self.gx)
+            m9_accel._geometry(l, False, self.gx)
         if self.cpu_fast and not hasattr(self, "_cpf"):
             self._cpf = self._cell_pool_tables()
-        for chain in (self.ch0, self.ch16):
+        for chain in (c for c in (self.ch0, self.ch16) if c is not None):
             z = np.zeros((2, chain.ninner))
             dts = ((np.float32, np.float64) if self.backend == "cpu"
                    else (np.float64,))
@@ -357,14 +375,40 @@ class FrameDecoder:
         m9_accel.bch_syndrome_batch(
             np.zeros((1, self.ch0.kldpc), np.uint8), self.ch0.ninner)
         SC4.sequence(self.ch0.kpayload)
-        np.fft.fft(np.zeros(C.NFFT, complex))
+        np.fft.fft(np.zeros(self.gx.nfft, complex))
         try:
             from scipy import fft as _sfft
-            _sfft.fft(np.zeros((C.NSYM, C.NFFT), complex), axis=1, workers=2)
+            _sfft.fft(np.zeros((self.gx.nsym, self.gx.nfft), complex), axis=1, workers=2)
         except Exception:                                      # noqa: BLE001
             pass
 
     # -- front end ---------------------------------------------------------
+    def _preamble_spare(self, y, t0):
+        """Spare Preamble cells that head the pool, over ALL NP symbols.
+
+        A/322 allows up to four Preamble symbols and L1 rides the first
+        cells of the concatenation, so the spare is what is left AFTER
+        L1-Basic + L1-Detail across all of them.  This module read symbol 0
+        only, which at NP = 2 silently dropped the whole spare -- field-site RF8's pool came out 135997 cells against a predicted 138213, short by
+        exactly the 2216 spare cells, and the HTI gather then indexed off the
+        end.  NP = 1 takes the original two lines unchanged.
+
+        Returns (spare, n_preamble_cells).
+        """
+        gx = self.gx
+        if gx.np_sym == 1 or gx.g is None:
+            zp, npre = C.demod_preamble(y, t0)
+            xp = FI.deinterleave(zp, gx.nfft, 0, direction="forward",
+                                 toggle="i")
+            return xp[gx.l1b_cells + gx.l1d_cells:], npre
+        pre = []
+        for s in range(gx.np_sym):
+            z, _coh = C._demod_preamble_g(y, t0, gx.g, s, 0)
+            pre.append(FI.deinterleave(z, gx.pre_nfft, s,
+                                       direction="forward", toggle="i"))
+        allpre = np.concatenate(pre)
+        return allpre[gx.l1b_cells + gx.l1d_cells:], len(allpre)
+
     def fine_timing(self, y, span=20, centre=None):
         centre = C.BOOTSTRAP if centre is None else centre
         cands = list(range(centre - span, centre + span + 1))
@@ -394,23 +438,29 @@ class FrameDecoder:
         parallel.  Symbols are independent, so this is exact."""
         import spec_pilots as P
         rep = report if report is not None else {}
-        _, _, n_null = P.sbs_cells(C.NFFT, C.CRED, C.PATTERN, 1)
+        n_null = self.gx.sbs_null   # what L1 signals, not what the pattern implies
         lo_n, hi_n = P.sbs_null_split(n_null)
-        n_norm = P.data_cells(C.NFFT, C.CRED, C.PATTERN, 1, False)
+        n_norm = P.data_cells(self.gx.nfft, self.gx.cred, self.gx.pattern, 1, False)
 
-        zp, npre = C.demod_preamble(y, t0)
-        xp = FI.deinterleave(zp, C.NFFT, 0, direction="forward", toggle="i")
-        spare = xp[C.L1B_CELLS + C.L1D_CELLS:]
+        spare, npre = self._preamble_spare(y, t0)
 
         def one(l):
-            sbs = l in C.SBS_SYMS
-            z, _ = C.demod_data(y, t0, l, sbs)
-            x = FI.deinterleave(z, C.NFFT, l + 1, direction="forward",
+            sbs = l in self.gx.sbs_syms
+            # m9_accel.install() has swapped this for the cached one,
+            # whose gx defaults to RF33 -- pass ours or the slow path
+            # silently demodulates a different multiplex than the fast one.
+            z, _ = C.demod_data(y, t0, l, sbs, self.gx)
+            # FI sequence index counts from the Frame start: the Preamble
+            # occupies indices 0..np_sym-1, so data symbol l is
+            # l + np_sym.  Was "l + 1" -- right only at NP = 1, which is
+            # what RF33 sends.  m44_ldm has always used `fi0 = g.np_sym`.
+            x = FI.deinterleave(z, self.gx.nfft, l + self.gx.np_sym,
+                                direction="forward",
                                 toggle="i")
             if sbs:
                 x = x[lo_n:len(x) - hi_n]
             return x
-        rng = range(C.NSYM)
+        rng = range(self.gx.nsym)
         xs = ([one(l) for l in rng] if self.ex is None
               else list(self.ex.map(one, rng)))
         parts = [spare] + xs
@@ -423,6 +473,43 @@ class FrameDecoder:
                    null_low=int(lo_n), pool=int(len(pool)))
         return pool, dict(symbol_of=np.concatenate(owner), report=rep)
 
+    def csi_pool(self, y, t0):
+        """|H|^2 of every data cell, in POOL order -- channel state for the LLRs.
+
+        The pool holds z = Y / H and drops H, so the demapper cannot tell a
+        cell from a faded carrier (noise amplified by 1/|H|) from one on a
+        strong carrier, and one sigma^2 per Block trusts them equally.  On
+        field-site RF8 the fade is frequency-selective (two soft notches
+        mid-band, band edges 1 dB better) and weighting each cell's LLRs by
+        min(|H|^2 / mean, 1) took the strongest Frames from 7, 0, 0, 1, 6,
+        4, 10 of 17 Blocks to 17, 17, 15, 17, 16, 17, 17 (9/10, harness).
+        Clipped at 1: only ever DOWN-weight a faded cell, never boost a
+        strong one past the min-sum ladder's scale.
+
+        Per-symbol H (not the CE-smoothed one the SM pool used): a WEIGHT
+        needs the fade's shape, not the equaliser's exact estimate, and this
+        keeps the C cell-pool kernel untouched.  Preamble spare cells weigh 1.
+        ~one extra FFT per symbol; negligible against the LDPC.
+        """
+        import spec_pilots as P
+        gx = self.gx
+        lo_n, hi_n = P.sbs_null_split(gx.sbs_null)
+        parts = [np.ones(len(self._preamble_spare(y, t0)[0]))]
+        for l in range(gx.nsym):
+            sbs = l in gx.sbs_syms
+            g = m9_accel._geometry(l, sbs, gx)
+            s = t0 + g["data_off"] + g["step"] * l + g["gi"]
+            Y = np.fft.fftshift(np.fft.fft(y[s:s + g["nfft"]]))
+            hp = Y[g["bins_pk"]] / g["refpk"]
+            H = C._interp(g["kk"], g["pk"], hp)
+            h2 = (np.abs(H[g["d"]]) ** 2).astype(np.complex128)
+            w = FI.deinterleave(h2, gx.nfft, l + gx.np_sym,
+                                direction="forward", toggle="i").real
+            if sbs:
+                w = w[lo_n:len(w) - hi_n]
+            parts.append(w)
+        return np.concatenate(parts)
+
     # -- batched cell pool (cpu_fast) --------------------------------------
     def _cell_pool_tables(self):
         """Per-symbol demod geometry, grouped by identical pilot pattern.
@@ -434,38 +521,39 @@ class FrameDecoder:
         """
         import spec_pilots as P
         from m9_accel import _geometry
-        _, _, n_null = P.sbs_cells(C.NFFT, C.CRED, C.PATTERN, 1)
+        n_null = self.gx.sbs_null   # what L1 signals, not what the pattern implies
         lo_n, hi_n = P.sbs_null_split(n_null)
-        n_norm = P.data_cells(C.NFFT, C.CRED, C.PATTERN, 1, False)
-        dx, dy = P.dxdy(C.PATTERN)
+        n_norm = P.data_cells(self.gx.nfft, self.gx.cred, self.gx.pattern, 1, False)
+        dx, dy = P.dxdy(self.gx.pattern)
         classes = {}
-        for l in range(C.NSYM):
-            sbs = l in C.SBS_SYMS
+        for l in range(self.gx.nsym):
+            sbs = l in self.gx.sbs_syms
             key = ("sbs",) if sbs else ("norm", l % dy)
             classes.setdefault(key, []).append(l)
         tabs = []
         for key, rows in classes.items():
             sbs = key[0] == "sbs"
-            g = _geometry(rows[0], sbs)
+            g = _geometry(rows[0], sbs, self.gx)
             pk, kk = g["pk"], g["kk"]
             j = np.clip(np.searchsorted(pk, kk, side="right") - 1,
                         0, len(pk) - 2)
             wt = (kk - pk[j]) / (pk[j + 1] - pk[j])
             nd = len(g["d"])
             Hmat = np.stack([FI.interleaving_sequence(
-                C.NFFT, l + 1, nd, direction="forward", toggle="i")
+                self.gx.nfft, l + self.gx.np_sym, nd,
+                direction="forward", toggle="i")
                 for l in rows])
             tabs.append(dict(rows=np.array(rows), sbs=sbs, g=g, j=j, wt=wt,
                              nd=nd, Hmat=Hmat,
                              trim=(lo_n, nd - hi_n) if sbs else (0, nd)))
         # symbol_of and the per-symbol output slots are frame-constant too
-        lens = np.empty(C.NSYM, int)
+        lens = np.empty(self.gx.nsym, int)
         for t in tabs:
             a, b = t["trim"]
             lens[t["rows"]] = b - a
         return dict(tabs=tabs, lens=lens, n_null=n_null, lo_n=lo_n,
                     hi_n=hi_n, n_norm=n_norm,
-                    step=C.NFFT + C.GI, gi=C.GI)
+                    step=self.gx.nfft + self.gx.gi, gi=self.gx.gi)
 
     def cell_pool_fast(self, y, t0, report=None):
         """cell_pool with the 35 symbol demods batched per pilot class.
@@ -483,14 +571,12 @@ class FrameDecoder:
         if not hasattr(self, "_cpf"):
             self._cpf = self._cell_pool_tables()
         cp = self._cpf
-        zp, npre = C.demod_preamble(y, t0)
-        xp = FI.deinterleave(zp, C.NFFT, 0, direction="forward", toggle="i")
-        spare = xp[C.L1B_CELLS + C.L1D_CELLS:]
+        spare, npre = self._preamble_spare(y, t0)
 
         step, gi = cp["step"], cp["gi"]
         st = np.lib.stride_tricks.as_strided
-        base = y[t0 + step + gi:]
-        W = st(base, shape=(C.NSYM, C.NFFT),
+        base = y[t0 + self.gx.data_off + gi:]
+        W = st(base, shape=(self.gx.nsym, self.gx.nfft),
                strides=(step * base.strides[0], base.strides[0]))
         try:
             from scipy import fft as _sfft
@@ -583,8 +669,8 @@ class FrameDecoder:
         """
         import spec_pilots as P
         cp = self._cpf
-        dx, dy = P.dxdy(C.PATTERN)
-        noc = P.NOC[(C.NFFT, C.CRED)]
+        dx, dy = P.dxdy(self.gx.pattern)
+        noc = P.NOC[(self.gx.nfft, self.gx.cred)]
         usable = (noc - 1) % dx == 0
         ngrid = (noc - 1) // dx + 1
         gc = np.arange(ngrid) * dx
@@ -599,6 +685,39 @@ class FrameDecoder:
             per.append(pk // dx)
         return dict(dx=dx, dy=dy, noc=noc, ngrid=ngrid, jg=jg, wtg=wtg,
                     gidx=per, usable=usable)
+
+    @staticmethod
+    def _ce_common_phase(Hg, Mg):
+        """Unit phasor per symbol: its common phase relative to the Frame's
+        middle symbol, measured over the whole pilot grid.
+
+        A symbol only carries pilots on its own parity's carriers, so two
+        neighbouring symbols share (almost) no carriers and cannot be compared
+        directly.  Interpolating each symbol's pilots across the grid puts
+        every symbol on ALL grid carriers; the interpolation error is a small,
+        mostly real factor that is the same for both parities and does not
+        bias the phase.  One refinement pass replaces the single (noisy)
+        reference symbol by the mean of the de-rotated symbols.
+        """
+        ngrid, nsym = Hg.shape
+        idx = np.arange(ngrid)
+        G = np.empty((ngrid, nsym), np.complex128)
+        for l in range(nsym):
+            m = Mg[:, l]
+            if m.sum() < 2:                     # nothing to measure: leave it
+                G[:, l] = 0.0
+                continue
+            xp, v = idx[m], Hg[m, l]
+            G[:, l] = np.interp(idx, xp, v.real) + 1j * np.interp(idx, xp,
+                                                                   v.imag)
+        ref = G[:, nsym // 2]
+        rot = np.ones(nsym, np.complex128)
+        for _ in range(2):
+            c = np.conj(ref) @ G
+            a = np.abs(c)
+            rot = np.where(a > 1e-30, c / np.maximum(a, 1e-30), 1.0)
+            ref = (G * np.conj(rot)[None, :]).mean(axis=1)
+        return rot
 
     def cell_pool_fast_sm(self, y, t0, report=None):
         """cell_pool_fast with E58's time-smoothed channel estimation.
@@ -626,14 +745,12 @@ class FrameDecoder:
             smt = self._smt = self._sm_tables()
         if not smt["usable"]:                    # defensive: unknown pattern
             return self.cell_pool_fast(y, t0, report)
-        zp, npre = C.demod_preamble(y, t0)
-        xp = FI.deinterleave(zp, C.NFFT, 0, direction="forward", toggle="i")
-        spare = xp[C.L1B_CELLS + C.L1D_CELLS:]
+        spare, npre = self._preamble_spare(y, t0)
 
         step, gi = cp["step"], cp["gi"]
         st = np.lib.stride_tricks.as_strided
-        base = y[t0 + step + gi:]
-        W = st(base, shape=(C.NSYM, C.NFFT),
+        base = y[t0 + self.gx.data_off + gi:]
+        W = st(base, shape=(self.gx.nsym, self.gx.nfft),
                strides=(step * base.strides[0], base.strides[0]))
         try:
             from scipy import fft as _sfft
@@ -659,7 +776,7 @@ class FrameDecoder:
         # SHAPE, which is what is actually quasi-static.  The change
         # detector watches the normalised residual and still guards what a
         # scalar cannot represent (delay / multipath shape changes).
-        ngrid, nsym = smt["ngrid"], C.NSYM
+        ngrid, nsym = smt["ngrid"], self.gx.nsym
         Hg = np.zeros((ngrid, nsym), np.complex128)
         Mg = np.zeros((ngrid, nsym), bool)
         hps = []
@@ -674,7 +791,33 @@ class FrameDecoder:
         w_c = np.zeros(nsym, bool)
         if mg.ce_norm:
             cnt_tot = np.maximum(Mg.sum(axis=1), 1)
-            M = np.where(Mg, Hg, 0).sum(axis=1) / cnt_tot  # frame-mean shape
+            # DE-ROTATE BEFORE AVERAGING (9/21, measured necessity).  M used
+            # to be the mean of the RAW pilots.  A residual carrier offset
+            # turns every symbol by a common phase -- ~10 deg/symbol was
+            # measured on live RF33 air as the tuner drifted, ~350 deg over
+            # the 35-symbol Frame -- and the mean of a phasor that goes once
+            # round is ~ZERO.  Worse, odd and even symbols carry their pilots
+            # on DIFFERENT carriers (dy = 2), so M's two halves are means over
+            # different symbol sets and collapse DIFFERENTLY: c_l then comes
+            # out alternately too large and too small, the data cells of
+            # alternate symbols were scaled x0.77 / x1.30, and Frames with
+            # perfect dummy cells at 17 dB decoded 0/74 -- 108 in a row, 27 s,
+            # while the per-symbol path and the exact path held 74/74.  Neither
+            # change detector can see it: the residual is measured against
+            # the same poisoned M.  It looked exactly like a fade, or like
+            # lost timing (14 re-acquisitions in 150 s).
+            #
+            # So measure each symbol's common phase FIRST, against a reference
+            # symbol, over the WHOLE grid (its own pilots interpolated across
+            # the other parity's carriers, so every symbol is compared on the
+            # same carriers), and average the de-rotated pilots.  Phase only:
+            # amplitude stays in the mean exactly as before.  c_l below is
+            # still the LS fit of the RAW pilots onto M, so nothing else in
+            # this function changes meaning.
+            rot = (self._ce_common_phase(Hg, Mg)
+                   if getattr(mg, "ce_derot", True)
+                   else np.ones(nsym, np.complex128))   # gate control only
+            M = (np.where(Mg, Hg, 0) * np.conj(rot)[None, :]).sum(axis=1)                 / cnt_tot                                  # frame-mean shape
             for ci, t in enumerate(cp["tabs"]):
                 gx = smt["gidx"][ci]
                 Mx = M[gx]
@@ -1238,16 +1381,24 @@ class FrameDecoder:
     def _build_gpu_bicm(self, pool_len, dv, symbol_of):
         import m9_gpu
         nrows = self.ch0.cells_per_fec
-        ncols = C.PLP0["n_fec_max"] // C.PLP0["nti"]
-        per_ti = C.PLP0["size"] // C.PLP0["nti"]
+        ncols = self.gx.plp0["n_fec_max"] // self.gx.plp0["nti"]
+        per_ti = self.gx.plp0["size"] // self.gx.plp0["nti"]
         idx = np.array([ti * per_ti + T.fec_block(np.arange(per_ti), j,
                                                   nrows, ncols, 0)
-                        for ti in range(C.PLP0["nti"])
+                        for ti in range(self.gx.plp0["nti"])
                         for j in range(ncols)])
+        p16 = self.gx.plp16
+        if p16 is None:
+            # The GPU BICM kernel is built around a second PLP.  Rather than
+            # feed it a zero-length one and hope, say so: --accel cpu decodes
+            # this multiplex today.
+            raise NotImplementedError(
+                "GPU BICM needs a second Subframe-0 PLP; this multiplex has "
+                "one (%s). Use --accel cpu." % self.gx.describe())
         self.gb = m9_gpu.GpuBicm(
-            pool_len, C.PLP0["size"], C.PLP16["start"], C.PLP16["size"],
+            pool_len, self.gx.plp0["size"], p16["start"], p16["size"],
             symbol_of, dv, self.pts0, self.pts16,
-            BI.MOD_BITS["64QAM"], BI.MOD_BITS["QPSK"], idx,
+            BI.MOD_BITS[self.gx.plp0["mod"]], BI.MOD_BITS[p16["mod"]], idx,
             self.ch0.lam_of_q, self.ch16.lam_of_q)
 
     def _frame_gpu(self, pool, info, dv, tm=None):
@@ -1267,7 +1418,7 @@ class FrameDecoder:
         tm["ldpc"] += pc() - t
         t = pc()
         dummy = C.dummy_check(np.concatenate(
-            [np.zeros(C.PLP16["start"] + C.PLP16["size"], complex), tail]))
+            [np.zeros(self.gx.dummy_start, complex), tail]))
         tm["dummy_check"] += pc() - t
         r16 = dict(bits=b16[0], converged=bool(cv16[0]), iters=int(it16[0]),
                    unsatisfied=int(bd16[0]))
@@ -1283,9 +1434,9 @@ class FrameDecoder:
             else:
                 packets.append(None)
         return r16, packets, dict(
-            dummy=dummy, converged=nconv, bch_ok=nbch, n_fec=C.PLP0["n_fec"],
+            dummy=dummy, converged=nconv, bch_ok=nbch, n_fec=self.gx.plp0["n_fec"],
             nrows=self.ch0.cells_per_fec,
-            ncols=C.PLP0["n_fec_max"] // C.PLP0["nti"])
+            ncols=self.gx.plp0["n_fec_max"] // self.gx.plp0["nti"])
 
     # -- one frame ---------------------------------------------------------
     def decode_frame(self, y, t0, rep=None):
@@ -1317,12 +1468,32 @@ class FrameDecoder:
             cp = self.cell_pool_fast if self.cpu_fast else self.cell_pool
             pool, info = cp(y, t0, rep_d)
         tm["cell_pool"] += pc() - t
+        # ATSC3_CSI=1 turns the per-cell channel-state weight ON.  Opt-in,
+        # and measured (9/10, field-site RF8, the eight strongest Frames):
+        # on the PLAIN pool it is enormous (7/0/0/1/6/4/9 -> 17/17/15/17/
+        # 16/17/17 of 17 Blocks); on the CE-smoothed pool this chain uses by
+        # default it is mixed (+4..+6 on some Frames, -2..-3 on others) and
+        # net NEGATIVE over the whole capture (1641 -> 1163 Blocks at
+        # CE_W=24), because smoothing H already removes most of the noise
+        # this weight exists to distrust -- two levers curing one illness
+        # do not add (E86 found the same of SP rescue).  It only ever
+        # applies inside the E60 weighted-LLR path (cpu_fast, wllr on or
+        # auto-below-gate).  Reach for it when CE smoothing is off.
+        if (self.cpu_fast and mg.wllr != "off"
+                and os.environ.get("ATSC3_CSI", "0") == "1"):
+            t = pc()
+            info["csi"] = self.csi_pool(y, t0)
+            tm["csi_pool"] += pc() - t
         key = len(pool)
         with self._tm_lock:
             if key not in self.regions:
-                self.regions[key] = C.constellation_regions(key)
+                self.regions[key] = C.constellation_regions(
+                    key, self.gx.plp0, self.gx.plp16)
         reg, dv = self.regions[key]
-        alph = [self.pts0, self.pts16]
+        # region id indexes this list, so a Subframe with one PLP must
+        # supply one alphabet -- there is no region 1 to look up.
+        alph = ([self.pts0] if self.gx.plp16 is None
+                else [self.pts0, self.pts16])
 
         if self.backend == "gpu-full":
             return self._frame_gpu(pool, info, dv, tm)
@@ -1331,7 +1502,7 @@ class FrameDecoder:
         pool, _ = self.cpe_correct(pool, info["symbol_of"], alph, reg, dv)
         tm["cpe_correct"] += pc() - t
         t = pc()
-        dummy = C.dummy_check(pool)
+        dummy = C.dummy_check(pool, self.gx.dummy_start)
         tm["dummy_check"] += pc() - t
 
         # E60: the auto-switch instrument -- channel SNR off the known +-1
@@ -1342,31 +1513,37 @@ class FrameDecoder:
         snr_db = None
         use_w = False
         if mg.wllr != "off":
-            snr_db = M16.frame_snr_db(
-                pool, C.PLP16["start"] + C.PLP16["size"])
+            snr_db = M16.frame_snr_db(pool, self.gx.dummy_start)
             use_w = (mg.wllr == "on"
                      or (snr_db is not None and snr_db < mg.snr_gate_db))
             # += 0 creates the key: the counter must EXIST at zero so the
             # strong-signal gate can tell "switch held" from "not recorded"
             tm["n_wllr_frames"] += int(use_w)
 
-        # PLP 16 -- one FEC Block
+        # The SECOND Subframe-0 PLP -- RF33's PLP 16, one small QPSK Block.
+        # Not every multiplex has one (field-site RF8 carries a single PLP in
+        # Subframe 0), and decoding the cells after the core PLP anyway would
+        # be demapping dummy cells as if they were a codeword.
         t = pc()
         ldt = np.float32 if self.cpu_fast else np.float64
-        c16 = pool[C.PLP16["start"]:C.PLP16["start"] + C.PLP16["size"]]
-        q16 = self.demap_batch(c16[None, :], self.pts16, self.ones16)
-        lam16 = np.empty((1, 16200), ldt)
-        lam16[:, self.ch16.lam_of_q] = q16
-        b16, cv16, it16, bd16 = self.ldpc_batch(lam16, self.ch16, self.g16)
-        r16 = dict(bits=b16[0], converged=bool(cv16[0]), iters=int(it16[0]),
-                   unsatisfied=int(bd16[0]))
+        if self.gx.plp16 is None:
+            r16 = None
+        else:
+            p16 = self.gx.plp16
+            c16 = pool[p16["start"]:p16["start"] + p16["size"]]
+            q16 = self.demap_batch(c16[None, :], self.pts16, self.ones16)
+            lam16 = np.empty((1, p16["ninner"]), ldt)
+            lam16[:, self.ch16.lam_of_q] = q16
+            b16, cv16, it16, bd16 = self.ldpc_batch(lam16, self.ch16, self.g16)
+            r16 = dict(bits=b16[0], converged=bool(cv16[0]),
+                       iters=int(it16[0]), unsatisfied=int(bd16[0]))
         tm["plp16"] += pc() - t
 
         # PLP 0 -- 74 FEC Blocks, all independent
         t = pc()
-        plp0 = pool[:C.PLP0["size"]]
-        nrows, ncols = self.ch0.cells_per_fec, C.PLP0["n_fec_max"] // C.PLP0["nti"]
-        per_ti = len(plp0) // C.PLP0["nti"]
+        plp0 = pool[:self.gx.plp0["size"]]
+        nrows, ncols = self.ch0.cells_per_fec, self.gx.plp0["n_fec_max"] // self.gx.plp0["nti"]
+        per_ti = len(plp0) // self.gx.plp0["nti"]
         # ONE cached gather instead of 74 fec_block calls: fec_block is pure
         # indexing, so fec_block(seg, ...) == seg[fec_block(arange, ...)]
         # element for element (the same identity _build_gpu_bicm uses).
@@ -1375,8 +1552,20 @@ class FrameDecoder:
             hidx = self._hti_idx = np.array(
                 [ti * per_ti + T.fec_block(np.arange(per_ti), j, nrows,
                                            ncols, 0)
-                 for ti in range(C.PLP0["nti"]) for j in range(ncols)])
+                 for ti in range(self.gx.plp0["nti"]) for j in range(ncols)])
         cells = plp0[hidx]
+        # A/322 7.1.5.2, the second HTI stage.  Optional and signalled per
+        # PLP; RF33 sends 0 so it was never implemented, and a multiplex that
+        # sends 1 (field-site RF8) hands the LDPC a permuted codeword that
+        # cannot converge at any SNR.  `hidx` groups rows by TI Block
+        # (ti-major), and the permutation resets at each TI Block, so
+        # de-interleave one group at a time.
+        if self.gx.plp0.get("cell_interleaver"):
+            ncols_ti = len(cells) // self.gx.plp0["nti"]
+            for ti in range(self.gx.plp0["nti"]):
+                lo_ti = ti * ncols_ti
+                cells[lo_ti:lo_ti + ncols_ti] = T.cell_deinterleave(
+                    cells[lo_ti:lo_ti + ncols_ti])
         tm["hti"] += pc() - t
         t = pc()
         if use_w:
@@ -1396,14 +1585,27 @@ class FrameDecoder:
             s2p = np.bincount(pid.ravel(), weights=d2min.ravel(),
                               minlength=npart) / cnts
             s2p = np.maximum(s2p, 1e-6).astype(np.float32)
-            qr = q.reshape(len(cells), -1, BI.MOD_BITS["64QAM"])
+            qr = q.reshape(len(cells), -1,
+                           BI.MOD_BITS[self.gx.plp0["mod"]])
             qr /= s2p[pid][:, :, None]
+            csi = info.get("csi")
+            if csi is not None:
+                # Same journey the cells took: HTI gather, then the cell
+                # interleaver per TI Block, so weight i sits under cell i.
+                w = csi[:self.gx.plp0["size"]][hidx]
+                if self.gx.plp0.get("cell_interleaver"):
+                    nc = len(w) // self.gx.plp0["nti"]
+                    for ti in range(self.gx.plp0["nti"]):
+                        w[ti * nc:(ti + 1) * nc] = T.cell_deinterleave(
+                            w[ti * nc:(ti + 1) * nc].astype(np.complex128)).real
+                w = np.minimum(w / max(float(w.mean()), 1e-12), 1.0)
+                qr *= w[:, :, None].astype(qr.dtype)
             tm["wllr"] += pc() - t
         else:
             q = self.demap_batch(cells, self.pts0, self.ones0)
             tm["demap"] += pc() - t
         t = pc()
-        lam = np.empty((len(cells), 16200), ldt)
+        lam = np.empty((len(cells), self.gx.plp0["ninner"]), ldt)
         lam[:, self.ch0.lam_of_q] = q
         tm["bit_deint"] += pc() - t
         t = pc()
@@ -1448,7 +1650,7 @@ class FrameDecoder:
             else:
                 packets.append(None)
         return r16, packets, dict(dummy=dummy, converged=nconv, bch_ok=nbch,
-                                  n_fec=C.PLP0["n_fec"], nrows=nrows,
+                                  n_fec=self.gx.plp0["n_fec"], nrows=nrows,
                                   ncols=ncols, snr_db=snr_db, wllr=use_w)
 
     def close(self):
