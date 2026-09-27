@@ -154,6 +154,13 @@ def main():
                     x = buf[:2 * n].astype(np.float32).view(np.complex64)
                     iq[got:got + n] = x / 32768.0
                     got += n
+            if got < n_want // 2:
+                # a short/empty capture (radio handover, overrun burst) is not
+                # a verdict on the channel; say so instead of crashing argmax
+                results.append(dict(rf=rf, atsc3=None, rms=None, got=got,
+                                    note="short capture"))
+                log(f"  RF{rf}: SHORT CAPTURE ({got}/{n_want} samples) -- skipped")
+                continue
             y = MP.resample_to(iq[:got], fs, bs.FS)
             hits = MP.find_bootstraps(y)
             in_rms = float(np.sqrt((np.abs(iq[:got]) ** 2).mean()) * 32768)
@@ -177,6 +184,7 @@ def main():
         del sdr
         if radio_lock is not None:
             radio_lock.release(OWNER)
+    os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)
     json.dump(dict(when=time.strftime("%Y-%m-%d %H:%M"),
                    ant=a.ant, secs=a.secs, results=results,
                    yielded=yielded),

@@ -53,7 +53,11 @@ def find_python(explicit=None):
     cands = [explicit] if explicit else []
     cands += [os.path.expanduser(r"~\radioconda\python.exe"),
               os.path.expanduser("~/radioconda/python.exe"),
-              os.path.expanduser("~/radioconda/bin/python")]
+              os.path.expanduser("~/radioconda/bin/python"),
+              # Linux distro installs (Arch/Debian python3-soapysdr): the
+              # running interpreter and the system python3 are candidates too
+              sys.executable,
+              shutil.which("python3")]
     for c in cands:
         if c and os.path.isfile(c):
             try:
