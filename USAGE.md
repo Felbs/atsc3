@@ -161,7 +161,8 @@ The gate re-decodes the same signal through an independent offline path and
 checks the streaming receiver against it — the receiver's own honesty test:
 
 ```
-python -m atsc3 gate --rf N
+python tools/atsc3_capture.py --rf N --secs 40 --ant PORT --out gate.cs16   # bank ~40 s of air first
+python -m atsc3 gate --capture gate.cs16 --rate 6912000                     # gate has no --rf
 ```
 
 A pass means the live streaming path produced **byte-identical** output (matching
