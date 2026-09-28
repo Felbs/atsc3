@@ -49,7 +49,7 @@
 #define EXPORT
 #endif
 
-EXPORT int32_t spectral_kernel_abi(void) { return 1; }
+EXPORT int32_t spectral_kernel_abi(void) { return 2; }   /* 2: + scale-factor / SNF group decoders (2026-09-27) */
 
 typedef struct {
     const uint8_t *d;
@@ -169,3 +169,99 @@ EXPORT int32_t asf_spectral_i32(const uint8_t *buf, int64_t nbytes,
     *bitpos = b.p;
     return 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * 2026-09-27: the scale-factor path.  Profiled on a 2-core laptop, the two
+ * Python loops below (m28_channels._scalefac_group / _snf_group) were ~40 %
+ * of the whole AC-4 decode: one Huffman symbol per band through the Python
+ * bit reader, plus a NumPy max() over a handful of lines per band, ~1.3 M
+ * calls each for four minutes of audio.  Same tree walk as the spectral
+ * kernel above; the arithmetic is Pseudocode 21 unchanged.
+ *   out[sfb] = INT32_MIN marks "no scale factor for this band" (Python None).
+ *   cur / first are in/out and committed only on rc == 0, like bitpos.
+ */
+static inline int32_t band_max_i32(const int32_t *lines, int32_t nlines,
+                                   const int32_t *offsets, int32_t noffs,
+                                   int32_t sfb)
+{
+    if (sfb + 1 >= noffs) return 0;
+    int32_t lo = offsets[sfb], hi = offsets[sfb + 1];
+    if (hi > nlines) hi = nlines;
+    int32_t m = 0;
+    for (int32_t i = lo; i < hi; ++i) {
+        const int32_t a = lines[i] < 0 ? -lines[i] : lines[i];
+        if (a > m) m = a;
+    }
+    return m;
+}
+
+static inline int32_t walk_one(bits_t *b, const int32_t *tree, int32_t root,
+                               int32_t *rc)
+{
+    int32_t node = root, err = 0;
+    for (int32_t depth = 0; depth < 64; ++depth) {
+        const int32_t bit = bit1(b, &err);
+        if (err) { *rc = 10; return -1; }
+        const int32_t nxt = tree[2 * node + bit];
+        if (nxt == 0) { *rc = 11; return -1; }
+        if (nxt < 0) return -nxt - 1;
+        node = nxt;
+    }
+    *rc = 12;
+    return -1;
+}
+
+EXPORT int32_t asf_sf_group_i32(const uint8_t *buf, int64_t nbytes,
+                                int64_t *bitpos,
+                                const int32_t *sfb_cb, int32_t max_sfb,
+                                const int32_t *lines, int32_t nlines,
+                                const int32_t *offsets, int32_t noffs,
+                                const int32_t *tree, int32_t root,
+                                int32_t centre, int32_t *cur, int32_t *first,
+                                int32_t *out)
+{
+    if (root < 0 || max_sfb < 0 || *bitpos < 0) return 2;
+    bits_t b = { buf, nbytes * 8, *bitpos };
+    int32_t c = *cur, f = *first, rc = 0;
+    for (int32_t sfb = 0; sfb < max_sfb; ++sfb) {
+        out[sfb] = INT32_MIN;
+        if (sfb_cb[sfb] != 0 &&
+            band_max_i32(lines, nlines, offsets, noffs, sfb) > 0) {
+            if (f) {
+                const int32_t sym = walk_one(&b, tree, root, &rc);
+                if (sym < 0) return rc;
+                c += sym - centre;
+            } else {
+                f = 1;
+            }
+            out[sfb] = c;
+        }
+    }
+    *bitpos = b.p; *cur = c; *first = f;
+    return 0;
+}
+
+EXPORT int32_t asf_snf_group_i32(const uint8_t *buf, int64_t nbytes,
+                                 int64_t *bitpos,
+                                 const int32_t *sfb_cb, int32_t max_sfb,
+                                 const int32_t *lines, int32_t nlines,
+                                 const int32_t *offsets, int32_t noffs,
+                                 const int32_t *tree, int32_t root,
+                                 int32_t centre, int32_t *out)
+{
+    if (root < 0 || max_sfb < 0 || *bitpos < 0) return 2;
+    bits_t b = { buf, nbytes * 8, *bitpos };
+    int32_t rc = 0;
+    for (int32_t sfb = 0; sfb < max_sfb; ++sfb) {
+        out[sfb] = INT32_MIN;
+        if (sfb_cb[sfb] == 0 ||
+            band_max_i32(lines, nlines, offsets, noffs, sfb) == 0) {
+            const int32_t sym = walk_one(&b, tree, root, &rc);
+            if (sym < 0) return rc;
+            out[sfb] = sym - centre;
+        }
+    }
+    *bitpos = b.p;
+    return 0;
+}
+

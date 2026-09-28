@@ -74,6 +74,7 @@ import argparse
 import os
 import sys
 
+import functools
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -90,13 +91,16 @@ ALPHA = {2048: 3.0, 1920: 3.0, 1536: 3.0,
          128: 6.0, 120: 6.0, 96: 6.0}
 
 
+@functools.lru_cache(maxsize=64)   # 2026-09-27: the window is a pure function of (n, alpha); np.i0 per frame was ~15 % of the AC-4 decode
 def kbd_left(n, alpha):
     """KBD_LEFT(N, .) -- the rising half, length n.  Clause 5.5.3."""
     p = np.arange(n + 1)
     k = np.i0(np.pi * alpha * np.sqrt(np.maximum(
         0.0, 1.0 - (2.0 * p / n - 1.0) ** 2))) / np.i0(np.pi * alpha)
     c = np.cumsum(k)
-    return np.sqrt(c[:-1] / c[-1])
+    out = np.sqrt(c[:-1] / c[-1])
+    out.flags.writeable = False     # cached: a caller that mutated it would poison every later frame
+    return out
 
 
 def left_window(n, n_prev, alpha=None):
