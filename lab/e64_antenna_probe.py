@@ -102,7 +102,7 @@ def measure(sdr, st, buf, rf):
     # systemd-oomd killed the whole session. Refuse before allocating; the number says how long fits.
     _need = n_want * 8 * 2
     try:
-        _avail = __import__("os").sysconf("SC_AVPHYS_PAGES") * __import__("os").sysconf("SC_PAGE_SIZE")
+        _avail = int(next((l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemAvailable:")), "0")) * 1024  # MemAvailable, not MemFree: page cache is reclaimable (2026-09-28)
     except (ValueError, OSError, AttributeError):
         _avail = None
     if _avail and _need > 0.6 * _avail:
