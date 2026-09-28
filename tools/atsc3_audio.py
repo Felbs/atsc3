@@ -540,7 +540,18 @@ def main():
     # until 8/07 this worker synthesized only the first pair and the rest
     # went to silence. Order L R C LFE Ls Rs = the standard WAV 6-channel
     # layout, so the file IS a 5.1 file without any channel map.
-    chans = Ac4Stream.CHANS if a.channels == 6 else ("L", "R")
+    # 2026-09-27: "stereo" must CARRY THE DIALOGUE. Until now --channels 2
+    # synthesised only L and R and dropped the centre -- where the voice
+    # lives (measured: C -28 dBFS vs L -31 on a news programme; stereo-L was
+    # 1.00-correlated with L and 0.19 with C at +12.5 ms = only the room's
+    # reverb of the voice survived, heard as "far away, echoing"). E98 hit
+    # the same thing on 8/22. Now the centre is synthesised too and folded
+    # in at -3 dB (ITU-R BS.775): L' = L + 0.707 C, R' = R + 0.707 C.
+    # ATSC3_STEREO_CENTRE=0 restores the old L/R-only pair.
+    stereo_centre = (a.channels == 2
+                     and os.environ.get("ATSC3_STEREO_CENTRE", "1") != "0")
+    chans = (Ac4Stream.CHANS if a.channels == 6
+             else (("L", "R", "C") if stereo_centre else ("L", "R")))
     wav = WavAppender(out, ch=a.channels, resume=resume_n)
     dec = Ac4Stream(element=a.element)
     LEAD = 4                        # frames of QMF lead-in, discarded
@@ -725,7 +736,11 @@ def main():
                             lead_pcm[ka] = pcm[ka][-LEAD * 1536:]
                             lead_pcm[kb] = pcm[kb][-LEAD * 1536:]
                         lead_groups[gkey] = (lead_groups[gkey] + gl)[-LEAD:]
-                y = np.column_stack([pcm[k] for k in chans])
+                if stereo_centre and "C" in pcm:
+                    c = 0.7071 * pcm["C"]
+                    y = np.column_stack([pcm["L"] + c, pcm["R"] + c])
+                else:
+                    y = np.column_stack([pcm[k] for k in chans])
                 rs0 = resume_skip
                 if resume_skip:
                     y = y[resume_skip * 1536:]
@@ -749,7 +764,7 @@ def main():
                     for pos, miss in ins:
                         pos = min(pos, len(y) // 1536)
                         parts.append(y[prev * 1536:pos * 1536])
-                        parts.append(np.zeros((miss * 1536, len(chans))))
+                        parts.append(np.zeros((miss * 1536, y.shape[1])))
                         n_padded += miss
                         pad_done += miss
                         prev = pos
