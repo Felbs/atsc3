@@ -1525,6 +1525,7 @@ class FrameDecoder:
             if auto_db > 0 and snr_db is not None:
                 # hysteresis: off at auto_db, back on 2 dB below it
                 was = getattr(self, "_lean", False)
+                self._lean = was          # inside the hysteresis band: unchanged
                 if snr_db >= auto_db:
                     self._lean = True
                 elif snr_db < auto_db - 2.0:
