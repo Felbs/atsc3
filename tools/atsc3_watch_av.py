@@ -215,6 +215,10 @@ def main():
         extra = a.chain_extra
         if not extra and (os.cpu_count() or 1) < 8:
             extra = "--decode-procs 2 --threads 2 --raw-queue 600"
+            # 2026-09-27: on a small box the E60 margin levers cost ~20 % of the
+            # chain on healthy air (see lab/m16_margin.py MarginCfg.auto_off_db);
+            # let the chain drop them by itself once the carrier reads 19 dB+.
+            os.environ.setdefault("ATSC3_MARGIN_AUTO_OFF", "19")
         chain = spawn([py, "tools/atsc3_run.py", "--rf", str(a.rf),
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
                        "--extra", ("--assets all " + extra).strip()])

@@ -173,6 +173,17 @@ picture that is *correct* from one that merely *looks* correct.
 
 ## Advanced / performance tuning
 
+**Small boxes (< 8 CPUs): the chain drops its margin levers by itself on strong carriers.**
+The E60 margin levers (CE smoothing, weighted LLRs, exact-BP rescue) buy decode
+margin at the cliff but cost ~12 % of the chain on healthy air (measured N=3 on a
+2-core laptop: 1.28x -> 1.44x offline, FEC identical). `ATSC3_MARGIN_AUTO_OFF=<dB>`
+makes the chain skip the lever machinery once a frame's dummy-cell SNR reads at or
+above that value, and bring it back 2 dB below it (hysteresis). The couch launcher
+sets 19 dB on boxes with fewer than 8 CPUs; `0` (the default elsewhere) keeps every
+existing result byte-identical. On that laptop, 10-minute live runs went from a
+drifting lag (22 -> 60 s, 5368 audio pads) to a steady one (22-30 s, ~2800 pads).
+
+
 These affect throughput and resource use, not what gets decoded. Defaults are
 sensible; reach for these only when you are chasing real-time on a specific box.
 

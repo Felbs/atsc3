@@ -112,6 +112,19 @@ class MarginCfg:
         if not master:
             self.wllr = "off"
         self.snr_gate_db = num(snr_gate_db, "ATSC3_SNR_GATE", 16.0, float)
+        # 2026-09-27 (measured on a 2-core laptop, RF33 at 22 dB dummy-cell
+        # SNR): the three levers cost ~7-9 % of chain CPU EACH on healthy
+        # air even when they change nothing (the rescue never fires, the
+        # weights are gated off, but the machinery still runs) - all off is
+        # +20 % (1.24 -> 1.43x offline, FEC 11914/11914 both ways). Live on
+        # that box the couch launcher went from a drifting lag (22 -> 60 s
+        # in 10 min, 5368 audio pads) to a steady one (22-28 s, 2857 pads).
+        # ATSC3_MARGIN_AUTO_OFF=<dB> (0 = disabled, the default, byte-identical
+        # to before): once a frame's dummy-cell SNR reads at or above this,
+        # the NEXT frames skip the lever machinery entirely; 2 dB below it
+        # the levers come back (hysteresis). The WL law shape, applied to
+        # CPU: margin at the cliff, none with margin.
+        self.auto_off_db = num(None, "ATSC3_MARGIN_AUTO_OFF", 0.0, float)
         self.sp = (bool(int(num(sp, "ATSC3_SP", 1, int))) if master else False)
         self.sp_ms = num(sp_ms, "ATSC3_SP_MS", 120.0, float)
         self.sp_cut = num(sp_cut, "ATSC3_SP_CUT", 1500, int)
