@@ -298,6 +298,48 @@ def _pid_alive(pid):
         return False
 
 
+def crash_ticket(live_dir, log_off, rc):
+    """2026-09-27: a chain that died WITH A TRACEBACK is a bug, not a drought.
+    Restarting it hides the evidence (crash_truncates_the_evidence) -- on
+    2026-09-27 three crashes per 10-minute run read as "SDR overflows" for an
+    hour because the supervisor quietly respawned the chain each time. So:
+    scan the chain log written since the spawn; if a Traceback is there, write
+    a ticket file next to the log (the traceback plus the 40 lines before it),
+    say so loudly, raise a desktop notification when one is available, and let
+    ATSC3_CRASH_STOP=1 turn the restart into a stop so the bug gets looked at.
+    Returns the ticket path or None."""
+    path = os.path.join(live_dir, "chain.log")
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(max(0, int(log_off or 0)))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return None
+    if "Traceback (most recent call last)" not in tail:
+        return None
+    lines = tail.splitlines()
+    i = max(k for k, l in enumerate(lines) if l.startswith("Traceback"))
+    ticket = os.path.join(live_dir, time.strftime("crash_%Y%m%d_%H%M%S.txt"))
+    # the exception line is the first unindented line after the header; the
+    # log may already continue with the respawned chain's lines after it
+    j = next((k for k in range(i + 1, len(lines))
+              if lines[k].strip() and not lines[k].startswith((" ", "Traceback"))), len(lines) - 1)
+    exc = lines[j]
+    body = "\n".join(lines[max(0, i - 40):j + 1]) + "\n"
+    with open(ticket, "w") as fh:
+        fh.write(f"# chain crashed rc={rc} at {time.strftime('%Y-%m-%d %H:%M:%S')}\n# {exc}\n\n{body}")
+    log(f"  *** CRASH TICKET {ticket} -- {exc[:120]}")
+    try:
+        import shutil
+        import subprocess
+        if shutil.which("notify-send"):
+            subprocess.Popen(["notify-send", "-u", "critical", "atsc3 chain crashed",
+                              f"{exc[:90]}\nticket: {ticket}"])
+    except Exception:                                      # noqa: BLE001
+        pass
+    return ticket
+
+
 def read_health(live_dir):
     """(bytes, updated, media_s, lanes) from the writer's heartbeat, or None.
 
@@ -454,6 +496,10 @@ def main():
                     continue
                 if died:
                     log(f"  chain EXITED (rc={proc.returncode})")
+                    if crash_ticket(a.live_dir, log_off, proc.returncode) \
+                            and os.environ.get("ATSC3_CRASH_STOP", "0") != "0":
+                        log("  ATSC3_CRASH_STOP=1: not restarting a crashed chain -- examine the ticket")
+                        break
                 elif time.time() - started < max(
                         a.startup,
                         LDM_STARTUP if ldm_cold_start(a.live_dir, log_off)
