@@ -267,6 +267,11 @@ def player(live):
         st = re.findall(r"dpmsStatus: (\d)", mon)
         out["display_on"] = any(s == "1" for s in st) if st else None
     rc, so, _ = sh(["pgrep", "-xa", "vlc"])
+    # ONE screen: a second viewer (two VLC windows, out of sync with each other) is a
+    # failure even when each copy plays perfectly -- the status page sees only one.
+    out["vlc_count"] = len([l for l in so.splitlines() if l.strip()])
+    _, vw, _ = sh(["pgrep", "-f", r"atsc3_t[v]\.py"])
+    out["viewer_count"] = len([l for l in vw.splitlines() if l.strip()])
     out["vlc_headless"] = "--vout=vdummy" in so
     m = re.search(r"--http-port (\d+) --http-password (\S+)", so)
     if m and shutil.which("curl"):
@@ -319,7 +324,8 @@ def grade(r):
         if p.get("display_on") is False and not p.get("vlc_headless"):
             g["player"] = "DARK"      # monitor off: the player cannot be graded, and is not the receiver's fault
         else:
-            g["player"] = "FAIL" if p["vlc_state"] != "playing" or not p["playhead_advancing"] or p.get("vlc_hw_decode_failures") \
+            g["player"] = "FAIL" if p.get("vlc_count", 1) > 1 or p.get("viewer_count", 1) > 1 \
+                or p["vlc_state"] != "playing" or not p["playhead_advancing"] or p.get("vlc_hw_decode_failures") \
                 else "WARN" if p.get("stall_s", 0) > 0 or p.get("dropped", 0) else "PASS"
     worst = "PASS"
     for v in g.values():
@@ -360,6 +366,7 @@ def show(r):
         print(f"  player   [{g.get('player','-'):4}] VLC {p['vlc_state']} t={p['vlc_time']} advancing {p['playhead_advancing']}  "
               f"pictures shown {st.get('displayedpictures')} lost {st.get('lostpictures')} ({p.get('vlc_lost_pct')}%)  "
               f"demux corrupt {st.get('demuxcorrupted')} discont {st.get('demuxdiscontinuity')}  audio buffers lost {st.get('lostabuffers')}/{st.get('playedabuffers')}  "
+              f"VLC windows {p.get('vlc_count')} viewers {p.get('viewer_count')}  "
               f"hw-decode failures {p['vlc_hw_decode_failures']}  mux stall {p.get('stall_s')} s dropped {p.get('dropped')} lag {p.get('lag_s')} s")
     else:
         print(f"  player   [----] {p.get('vlc_state')}")
