@@ -70,7 +70,7 @@ def _retune_tracker(fe, plan):
 
     9/10: the m9_fast path handed the front end no plan, so the tracker
     dead-reckoned every Frame by RF33's FRAME_SAMPLES -- 256 samples per
-    Frame wrong on field-site RF8 against a +-20 fine-timing window.  Nothing
+    Frame wrong on Smith Point RF8 against a +-20 fine-timing window.  Nothing
     could hold; the weak-Frame bootstrap re-acquire (43 per run) was doing the
     timing by brute force, and "hold the lock" collapsed to 57 Blocks.
 
@@ -210,7 +210,7 @@ class Watch:
         `--min-blocks` defaults to 60, which was 60 of RF33's 74 (81%).
         Held at 60 against a multiplex whose Frame carries 17 Blocks it can
         never be met, so every Frame is "weak" and the front end re-acquires
-        forever -- field-site RF8 re-acquired 26 times in 200 Frames.
+        forever -- Smith Point RF8 re-acquired 26 times in 200 Frames.
         Scale it, and keep RF33 at exactly 60.
         """
         return min(self.a.min_blocks,
@@ -859,7 +859,7 @@ class Watch:
                        f"{traceback.format_exc()}")
         # 9/10 -- the m9_fast path handed the front end NO plan, so its
         # timing tracker dead-reckoned every Frame by RF33's FRAME_SAMPLES:
-        # 256 samples per Frame wrong on field-site RF8 against a +-20
+        # 256 samples per Frame wrong on Smith Point RF8 against a +-20
         # fine-timing window.  Nothing could hold; the weak-Frame gate's
         # bootstrap re-acquire (43 per run) was doing all the timing work by
         # brute force, and "hold the lock" collapsed to 57 Blocks.  Whichever

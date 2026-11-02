@@ -179,7 +179,7 @@ if __name__ == "__main__":
 # A/322 7.1.5.2 -- the HTI CELL INTERLEAVER
 #
 # RF33 PLP 0 signals L1D_plp_HTI_cell_interleaver = 0, so this stage was
-# bypassed and never written.  field-site RF8 signals 1.  Without it the
+# bypassed and never written.  Smith Point RF8 signals 1.  Without it the
 # cells inside every FEC Block are in transmitter order, the LDPC is fed a
 # permuted codeword, and no amount of signal strength makes it converge --
 # which is exactly the "0 of N Blocks at any SNR" this chain showed.

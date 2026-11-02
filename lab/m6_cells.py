@@ -125,7 +125,7 @@ class Geom:
     above directly, so every non-CTI multiplex in the world was decoded as if
     it were RF33 -- 35 data symbols, 74 FEC Blocks of 64QAM-NUC 11/15.  On a
     broadcaster configured any other way that returns zero at any SNR, which
-    is what field-site RF8 does (23 symbols, 17 Blocks, QPSK 9/15).
+    is what Smith Point RF8 does (23 symbols, 17 Blocks, QPSK 9/15).
 
     This bundles the geometry so it can travel as a VALUE instead of being
     read out of module scope.  `Geom.rf33()` holds exactly the constants above
@@ -438,7 +438,7 @@ class Geometry:
         tot, act, nnull = P.sbs_cells(nfft, cred, pattern, 1)
         # 9/09 -- THE 190-CELL DEFICIT.  This trusted the null count COMPUTED
         # from the pilot pattern (127 for SP4_2 at 8K) and trimmed it from
-        # every SBS symbol.  field-site RF8 SIGNALS L1D_sbs_null_cells = 0:
+        # every SBS symbol.  Smith Point RF8 SIGNALS L1D_sbs_null_cells = 0:
         # the transmitter put DATA in those cells, so trimming them deleted
         # 127 real cells from symbol 0 and 63 from the low edge of symbol 22
         # -- 190 cells ahead of the dummy tail, exactly the shift the tail

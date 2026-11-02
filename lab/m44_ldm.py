@@ -195,7 +195,7 @@ class LdmPlan:
         # map), so the pool identity `pool == sum(plp_size) + dummy` can only
         # be closed against the PLPs of that SAME Subframe.  Summing every
         # layer-0 PLP in the Frame charged Subframe 1's PLPs to Subframe 0's
-        # pool: on field-site RF8 that read pool 138213 = core 1312200 +
+        # pool: on Smith Point RF8 that read pool 138213 = core 1312200 +
         # dummy -1173987 and the chain decoded 400 Frames to 0/29600 without
         # ever saying anything was wrong.
         self.core_sub = core.get("sub", 0)

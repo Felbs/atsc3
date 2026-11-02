@@ -389,7 +389,8 @@ class FrameDecoder:
         A/322 allows up to four Preamble symbols and L1 rides the first
         cells of the concatenation, so the spare is what is left AFTER
         L1-Basic + L1-Detail across all of them.  This module read symbol 0
-        only, which at NP = 2 silently dropped the whole spare -- field-site RF8's pool came out 135997 cells against a predicted 138213, short by
+        only, which at NP = 2 silently dropped the whole spare -- Smith Point
+        RF8's pool came out 135997 cells against a predicted 138213, short by
         exactly the 2216 spare cells, and the HTI gather then indexed off the
         end.  NP = 1 takes the original two lines unchanged.
 
@@ -479,7 +480,7 @@ class FrameDecoder:
         The pool holds z = Y / H and drops H, so the demapper cannot tell a
         cell from a faded carrier (noise amplified by 1/|H|) from one on a
         strong carrier, and one sigma^2 per Block trusts them equally.  On
-        field-site RF8 the fade is frequency-selective (two soft notches
+        Smith Point RF8 the fade is frequency-selective (two soft notches
         mid-band, band edges 1 dB better) and weighting each cell's LLRs by
         min(|H|^2 / mean, 1) took the strongest Frames from 7, 0, 0, 1, 6,
         4, 10 of 17 Blocks to 17, 17, 15, 17, 16, 17, 17 (9/10, harness).
@@ -1460,14 +1461,6 @@ class FrameDecoder:
         # and the GPU backends run the pre-E60 code untouched.
         mg = self.margin if (self.cpu_fast and self.backend == "cpu") \
             else M16.OFF
-        # SNR-gated auto-off (see MarginCfg.auto_off_db): the previous frame
-        # said the air has margin, so this frame runs the pre-E60 paths and
-        # keeps only the microsecond SNR read that decides the next frame.
-        auto_db = float(getattr(mg, "auto_off_db", 0.0) or 0.0)
-        lean = auto_db > 0 and getattr(self, "_lean", False)
-        if lean:
-            mg = M16.OFF
-            tm["n_lean_frames"] += 1
         rep_d = rep if rep is not None else {}
         if mg.ce_w > 0:
             pool, info = self.cell_pool_fast_sm(y, t0, rep_d)
@@ -1477,7 +1470,7 @@ class FrameDecoder:
             pool, info = cp(y, t0, rep_d)
         tm["cell_pool"] += pc() - t
         # ATSC3_CSI=1 turns the per-cell channel-state weight ON.  Opt-in,
-        # and measured (9/10, field-site RF8, the eight strongest Frames):
+        # and measured (9/10, Smith Point RF8, the eight strongest Frames):
         # on the PLAIN pool it is enormous (7/0/0/1/6/4/9 -> 17/17/15/17/
         # 16/17/17 of 17 Blocks); on the CE-smoothed pool this chain uses by
         # default it is mixed (+4..+6 on some Frames, -2..-3 on others) and
@@ -1520,29 +1513,16 @@ class FrameDecoder:
         # decodes stay byte-identical to HEAD by construction of the switch.
         snr_db = None
         use_w = False
-        if mg.wllr != "off" or auto_db > 0:
+        if mg.wllr != "off":
             snr_db = M16.frame_snr_db(pool, self.gx.dummy_start)
-            if auto_db > 0 and snr_db is not None:
-                # hysteresis: off at auto_db, back on 2 dB below it
-                was = getattr(self, "_lean", False)
-                self._lean = was          # inside the hysteresis band: unchanged
-                if snr_db >= auto_db:
-                    self._lean = True
-                elif snr_db < auto_db - 2.0:
-                    self._lean = False
-                if self._lean != was:
-                    print(f"  margin levers {'OFF' if self._lean else 'ON'}: "
-                          f"dummy-cell SNR {snr_db:.1f} dB vs auto-off {auto_db:.0f} dB",
-                          flush=True)
             use_w = (mg.wllr == "on"
-                     or (mg.wllr != "off" and snr_db is not None
-                         and snr_db < mg.snr_gate_db))
+                     or (snr_db is not None and snr_db < mg.snr_gate_db))
             # += 0 creates the key: the counter must EXIST at zero so the
             # strong-signal gate can tell "switch held" from "not recorded"
             tm["n_wllr_frames"] += int(use_w)
 
         # The SECOND Subframe-0 PLP -- RF33's PLP 16, one small QPSK Block.
-        # Not every multiplex has one (field-site RF8 carries a single PLP in
+        # Not every multiplex has one (Smith Point RF8 carries a single PLP in
         # Subframe 0), and decoding the cells after the core PLP anyway would
         # be demapping dummy cells as if they were a codeword.
         t = pc()
@@ -1577,7 +1557,7 @@ class FrameDecoder:
         cells = plp0[hidx]
         # A/322 7.1.5.2, the second HTI stage.  Optional and signalled per
         # PLP; RF33 sends 0 so it was never implemented, and a multiplex that
-        # sends 1 (field-site RF8) hands the LDPC a permuted codeword that
+        # sends 1 (Smith Point RF8) hands the LDPC a permuted codeword that
         # cannot converge at any SNR.  `hidx` groups rows by TI Block
         # (ti-major), and the permutation resets at each TI Block, so
         # de-interleave one group at a time.

@@ -2213,10 +2213,24 @@ class SdrSource:
             log(f"  *** GAIN NOT CONFIRMED: {e} ***")
             raise
         time.sleep(0.3)
+        # Bias-T for an active antenna (RSPdx: Antenna B only; does NOT
+        # survive a replug or reboot). Opt-in with ATSC3_BIAST=1, and like
+        # every other write it is read back before we believe it.
+        biast = None
+        if os.environ.get("ATSC3_BIAST") is not None:
+            want = os.environ["ATSC3_BIAST"] == "1"
+            self.sdr.writeSetting("biasT_ctrl", "true" if want else "false")
+            time.sleep(0.1)
+            biast = str(self.sdr.readSetting("biasT_ctrl")).lower() == "true"
+            log(f"  bias-T: wrote {want}, read back {biast}")
+            if biast != want:
+                raise RuntimeError(f"bias-T NOT CONFIRMED: wrote {want}, "
+                                   f"read back {biast}")
         self.readback = dict(
             rate=self.rate, rate_exact=abs(self.rate - self.want_rate) < 1.0,
             freq=float(self.sdr.getFrequency(SOAPY_SDR_RX, 0)),
-            antenna=self.sdr.getAntenna(SOAPY_SDR_RX, 0), rfgain_sel=rg)
+            antenna=self.sdr.getAntenna(SOAPY_SDR_RX, 0), rfgain_sel=rg,
+            bias_t=biast)
         try:
             self.readback["bandwidth"] = float(
                 self.sdr.getBandwidth(SOAPY_SDR_RX, 0))
