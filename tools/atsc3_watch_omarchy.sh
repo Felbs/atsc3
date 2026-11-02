@@ -23,6 +23,9 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PY=${PY:-$HOME/Projects/.venv/bin/python}   # the shared venv (Arch blocks system pip); override with PY=
 D=$HOME/atsc3_live_rf$RF
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1   # the AC-4 QMF loop thrashes a threaded BLAS (E56)
+# This box has no meteor-capture job (Felbs, 2026-11-02): never reserve the radio 02:10-05:40.
+# Set ATSC3_METEOR_WINDOW=HH:MM-HH:MM in the environment to bring a window back.
+export ATSC3_METEOR_WINDOW=${ATSC3_METEOR_WINDOW:-off}
 # bracket patterns everywhere: this script's own argv can never match itself (the pgrep trap)
 HELPERS='atsc3_tvwat[c]h\.py|atsc3_t[v]\.py|atsc3_aud[i]o\.py|atsc3_su[b]s\.py'
 CHAIN='atsc3 w[a]tch'

@@ -1421,6 +1421,14 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
         # falling back to decoding. Decode straight away: the stereo HDMI
         # sink gets VLC's downmix WITH the centre (dialogue) channel.
         cmd += ["--no-spdif"]
+        # --no-drop-late-frames (default since 2026-11-02): with VLC's own
+        # late-frame dropping the 720p60 lane reached the vout at ~36 fps
+        # (4649 pictures / 2 min) plus 1.2 % "lost"; without it 8004 / 2 min
+        # = 59.9 fps, 0 lost (headless A/B, tools/atsc3_quality.py). Measured
+        # headless only -- ATSC3_VLC_DROP_LATE=1 restores VLC's default if the
+        # on-screen check disagrees.
+        if os.environ.get("ATSC3_VLC_DROP_LATE", "0") != "1":
+            cmd += ["--no-drop-late-frames"]
     # ATSC3_VLC_EXTRA="--no-drop-late-frames --clock-jitter 0": extra VLC
     # options for A/B runs under tools/atsc3_quality.py without editing code.
     extra = os.environ.get("ATSC3_VLC_EXTRA", "").split()
