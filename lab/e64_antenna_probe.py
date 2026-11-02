@@ -97,17 +97,6 @@ def measure(sdr, st, buf, rf):
     while time.time() - t0 < 0.2:                 # flush retune transient
         sdr.readStream(st, [buf], 65536, timeoutUs=300000)
     n_want = int(SECS * FS)
-    # RAM guard (2026-09-27): this capture is held whole in memory and then demodulated in
-    # float (~2x the raw size). A 600 s AIS run asked an 8 GB laptop for ~20 GB and
-    # systemd-oomd killed the whole session. Refuse before allocating; the number says how long fits.
-    _need = n_want * 8 * 2
-    try:
-        _avail = int(next((l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemAvailable:")), "0")) * 1024  # MemAvailable, not MemFree: page cache is reclaimable (2026-09-28)
-    except (ValueError, OSError, AttributeError):
-        _avail = None
-    if _avail and _need > 0.6 * _avail:
-        raise MemoryError(f"capture of {n_want} samples needs ~{_need / 1e9:.1f} GB with {_avail / 1e9:.1f} GB free "
-                          f"- shorten it to about {int(n_want * 0.6 * _avail / _need)} samples ({0.6 * _avail / _need:.0%} of the request)")
     iq = np.empty(n_want, np.complex64)
     got = 0
     deadline = time.time() + SECS * 2 + 3

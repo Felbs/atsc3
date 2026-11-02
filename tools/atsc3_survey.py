@@ -141,17 +141,6 @@ def main():
             while time.time() - t0 < 0.2:
                 sdr.readStream(st, [buf], 65536, timeoutUs=300000)
             n_want = int(a.secs * fs)
-            # RAM guard (2026-09-27): this capture is held whole in memory and then demodulated in
-            # float (~2x the raw size). A 600 s AIS run asked an 8 GB laptop for ~20 GB and
-            # systemd-oomd killed the whole session. Refuse before allocating; the number says how long fits.
-            _need = n_want * 8 * 2
-            try:
-                _avail = int(next((l.split()[1] for l in open("/proc/meminfo") if l.startswith("MemAvailable:")), "0")) * 1024  # MemAvailable, not MemFree: page cache is reclaimable (2026-09-28)
-            except (ValueError, OSError, AttributeError):
-                _avail = None
-            if _avail and _need > 0.6 * _avail:
-                raise MemoryError(f"capture of {n_want} samples needs ~{_need / 1e9:.1f} GB with {_avail / 1e9:.1f} GB free "
-                                  f"- shorten it to about {int(n_want * 0.6 * _avail / _need)} samples ({0.6 * _avail / _need:.0%} of the request)")
             iq = np.empty(n_want, np.complex64)
             got = 0
             deadline = time.time() + a.secs * 2 + 3
@@ -165,13 +154,6 @@ def main():
                     x = buf[:2 * n].astype(np.float32).view(np.complex64)
                     iq[got:got + n] = x / 32768.0
                     got += n
-            if got < n_want // 2:
-                # a short/empty capture (radio handover, overrun burst) is not
-                # a verdict on the channel; say so instead of crashing argmax
-                results.append(dict(rf=rf, atsc3=None, rms=None, got=got,
-                                    note="short capture"))
-                log(f"  RF{rf}: SHORT CAPTURE ({got}/{n_want} samples) -- skipped")
-                continue
             y = MP.resample_to(iq[:got], fs, bs.FS)
             hits = MP.find_bootstraps(y)
             in_rms = float(np.sqrt((np.abs(iq[:got]) ** 2).mean()) * 32768)
@@ -195,7 +177,6 @@ def main():
         del sdr
         if radio_lock is not None:
             radio_lock.release(OWNER)
-    os.makedirs(os.path.dirname(a.out) or '.', exist_ok=True)
     json.dump(dict(when=time.strftime("%Y-%m-%d %H:%M"),
                    ant=a.ant, secs=a.secs, results=results,
                    yielded=yielded),

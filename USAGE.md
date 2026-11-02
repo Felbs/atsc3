@@ -44,26 +44,6 @@ python -m atsc3 watch --rf N --secs 300 --player none \
     --record tonight.mp4 --report tonight.json
 ```
 
-### One command for the couch: picture + 5.1 sound + captions
-
-```
-python tools/atsc3_watch_av.py --rf N --ant PORT --cc
-```
-
-This starts the chain, decodes **both** audio programs with the AC-4 decoder
-(the main as full 5.1, the second as stereo), and opens an `ffplay` window fed
-by `tools/atsc3_tv.py` — the broadcast HEVC is passed through untouched, the
-5.1 travels as AC-3, captions ride as a soft subtitle track. Closing the window
-stops everything. In the window: **`t`** toggles captions, **`a`** switches
-audio programs. `--lang spa` opens on the second program; `--stereo` downmixes
-the main (centre channel included) for a slower machine.
-
-Every 6 s chunk is logged to `<live-dir>/_tv/telemetry.jsonl` (mux time,
-audio frame carry, player queue depth and write latency, stalls, drops) and a
-one-line digest prints every 10 chunks — if the picture ever hitches, the
-reason is in that file. A player that stops reading is respawned at the live
-edge rather than allowed to stall the decoder.
-
 ---
 
 ## 2. Choose the audio language
@@ -71,10 +51,7 @@ edge rather than allowed to stall the decoder.
 NextGen TV multiplexes can carry more than one audio program — commonly a
 primary language and a second (e.g. Spanish). The receiver decodes both with its
 own AC-4 decoder and offers them as **selectable audio tracks in the player** —
-switch tracks the same way you would for any multi-audio file (`a` in the
-`atsc3_watch_av` window). The second program is whatever the station puts
-there: on one carrier we measured it as a dual-mono feed of the main's centre
-channel (same announcers, no crowd) despite a Spanish language tag. Both are muxed
+switch tracks the same way you would for any multi-audio file. Both are muxed
 into `--record` output, so a recording keeps every language.
 
 ---
@@ -83,8 +60,7 @@ into `--record` output, so a recording keeps every language.
 
 Closed captions (IMSC1 / TTML) are decoded and muxed as a **real, toggleable
 subtitle track**, time-aligned to the picture — not burned into it. Toggle them
-with your player's subtitle control (`t` in the `atsc3_watch_av` window); in a
-recording they remain a separate track
+with your player's subtitle control; in a recording they remain a separate track
 you can enable or disable later.
 
 ---
@@ -161,8 +137,7 @@ The gate re-decodes the same signal through an independent offline path and
 checks the streaming receiver against it — the receiver's own honesty test:
 
 ```
-python tools/atsc3_capture.py --rf N --secs 40 --ant PORT --out gate.cs16   # bank ~40 s of air first
-python -m atsc3 gate --capture gate.cs16 --rate 6912000                     # gate has no --rf
+python -m atsc3 gate --rf N
 ```
 
 A pass means the live streaming path produced **byte-identical** output (matching
@@ -172,17 +147,6 @@ picture that is *correct* from one that merely *looks* correct.
 ---
 
 ## Advanced / performance tuning
-
-**Small boxes (< 8 CPUs): the chain drops its margin levers by itself on strong carriers.**
-The E60 margin levers (CE smoothing, weighted LLRs, exact-BP rescue) buy decode
-margin at the cliff but cost ~12 % of the chain on healthy air (measured N=3 on a
-2-core laptop: 1.28x -> 1.44x offline, FEC identical). `ATSC3_MARGIN_AUTO_OFF=<dB>`
-makes the chain skip the lever machinery once a frame's dummy-cell SNR reads at or
-above that value, and bring it back 2 dB below it (hysteresis). The couch launcher
-sets 19 dB on boxes with fewer than 8 CPUs; `0` (the default elsewhere) keeps every
-existing result byte-identical. On that laptop, 10-minute live runs went from a
-drifting lag (22 -> 60 s, 5368 audio pads) to a steady one (22-30 s, ~2800 pads).
-
 
 These affect throughput and resource use, not what gets decoded. Defaults are
 sensible; reach for these only when you are chasing real-time on a specific box.

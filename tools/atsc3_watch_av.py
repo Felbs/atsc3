@@ -53,11 +53,7 @@ def find_python(explicit=None):
     cands = [explicit] if explicit else []
     cands += [os.path.expanduser(r"~\radioconda\python.exe"),
               os.path.expanduser("~/radioconda/python.exe"),
-              os.path.expanduser("~/radioconda/bin/python"),
-              # Linux distro installs (Arch/Debian python3-soapysdr): the
-              # running interpreter and the system python3 are candidates too
-              sys.executable,
-              shutil.which("python3")]
+              os.path.expanduser("~/radioconda/bin/python")]
     for c in cands:
         if c and os.path.isfile(c):
             try:
@@ -215,18 +211,6 @@ def main():
         extra = a.chain_extra
         if not extra and (os.cpu_count() or 1) < 8:
             extra = "--decode-procs 2 --threads 2 --raw-queue 600"
-            # 2026-09-27: on a small box the E60 margin levers cost ~20 % of the
-            # chain on healthy air (see lab/m16_margin.py MarginCfg.auto_off_db);
-            # let the chain drop them by itself once the carrier reads 19 dB+.
-            os.environ.setdefault("ATSC3_MARGIN_AUTO_OFF", "19")
-            # 2026-09-27: software HEVC in mpv is ~half a core on a small box;
-            # skip the in-loop deblocking filter, drop late frames at the
-            # decoder, and keep lavc to two threads so the chain's workers
-            # win the cores. Measured 10-min runs on a 2-core laptop: audio
-            # pads 1625 -> 188, re-acquisitions 3 -> 1, no stalls either way.
-            os.environ.setdefault(
-                "ATSC3_MPV_EXTRA",
-                "--vd-lavc-skiploopfilter=all --framedrop=decoder+vo --vd-lavc-threads=2")
         chain = spawn([py, "tools/atsc3_run.py", "--rf", str(a.rf),
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
                        "--extra", ("--assets all " + extra).strip()])

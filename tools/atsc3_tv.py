@@ -1399,7 +1399,10 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
     # NOTE (E37): VLC does NOT tail a growing file across EOF -- at EOF it
     # rewinds to zero (measured). The caller must keep it off EOF via the
     # lead governor + VlcRemote pause.
-    cmd = [vlc, "--file-caching=3000", "--meta-title", title]
+    # --sub-track=0: VLC never auto-selects a subtitle track, so the live
+    # captions (DVB subtitle track in the mux) stayed hidden until the user
+    # found Subtitle > Sub Track. Default them ON; the menu still toggles.
+    cmd = [vlc, "--file-caching=3000", "--sub-track=0", "--meta-title", title]
     if not IS_WIN:
         # fresh Linux installs pop a first-run privacy/network modal over
         # the video; nobody is at the keyboard of a spawned player (E56).
@@ -1407,6 +1410,22 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
         # checking and the option does not EXIST there -- VLC refuses to
         # start on an unknown option (measured, first spawn on the box).
         cmd += ["--no-qt-privacy-ask"]
+        # --avcodec-hw=none (measured 2026-11-01, GTX 1060 / nvidia 580 /
+        # Wayland): VLC picks VDPAU for HEVC, then every frame fails with
+        # "hardware acceleration picture allocation failed" -> audio plays,
+        # picture FROZEN. Software HEVC 720p60 is ~1 core here; keep it.
+        cmd += ["--avcodec-hw=none"]
+        # --no-spdif: with a 5.1 AC-3 track VLC first tries S/PDIF pass-
+        # through on the PipeWire sink ("digital pass-through stream
+        # connection failure", "failed to create audio output" x2) before
+        # falling back to decoding. Decode straight away: the stereo HDMI
+        # sink gets VLC's downmix WITH the centre (dialogue) channel.
+        cmd += ["--no-spdif"]
+    # ATSC3_VLC_EXTRA="--no-drop-late-frames --clock-jitter 0": extra VLC
+    # options for A/B runs under tools/atsc3_quality.py without editing code.
+    extra = os.environ.get("ATSC3_VLC_EXTRA", "").split()
+    if extra:
+        cmd += extra
     if headless:
         # --dummy-quiet only exists on the Windows build (it suppresses
         # the console window); the Linux build refuses unknown options
@@ -1466,10 +1485,6 @@ def spawn_mpv_pipe(title, extra=()):
     logf = os.environ.get("ATSC3_MPV_LOG")
     if logf:
         cmd.append(f"--log-file={logf}")
-    # 2026-09-27: ATSC3_MPV_EXTRA="--vd-lavc-skiploopfilter=all --framedrop=decoder+vo"
-    # -- player-side levers for a box where software HEVC is ~50 % of a core
-    # (measured on a 2-core laptop); whitespace-split, appended after ours.
-    cmd += os.environ.get("ATSC3_MPV_EXTRA", "").split()
     cmd += list(extra) + ["-"]
     return subprocess.Popen(
         cmd, stdin=subprocess.PIPE, env=display_env(),
