@@ -1402,7 +1402,13 @@ def spawn_vlc(out_ts, title, headless=False, http=None, start_time=None):
     # --sub-track=0: VLC never auto-selects a subtitle track, so the live
     # captions (DVB subtitle track in the mux) stayed hidden until the user
     # found Subtitle > Sub Track. Default them ON; the menu still toggles.
-    cmd = [vlc, "--file-caching=3000", "--sub-track=0", "--meta-title", title]
+    # --sub-track-id=259: pick the dvbsub ES BY PID (v2 mux order v/a/a/s ->
+    # ffmpeg PIDs 256..259). By index alone VLC can land on one of the EMPTY
+    # EIA-608 tracks it finds inside the HEVC SEI ("Closed captions 1-4") --
+    # measured 2026-11-02: captions hidden until switched to 259 by hand.
+    # v1 burns captions into the picture, so it has no PID 259 (harmless).
+    cmd = [vlc, "--file-caching=3000", "--sub-track=0", "--sub-track-id=259",
+           "--meta-title", title]
     if not IS_WIN:
         # fresh Linux installs pop a first-run privacy/network modal over
         # the video; nobody is at the keyboard of a spawned player (E56).
@@ -1773,6 +1779,16 @@ def main():
     if getattr(a, "transport", "mmtp") == "route":
         KIND_SUFFIX, VIDEO_KIND = "route_", "route_video"
     d = a.live_dir
+    # ONE viewer per live dir: two would open two VLC windows playing out of sync
+    # (seen 2026-11-02 after an overlapping restart). The lock dies with the process.
+    import fcntl
+    global _VIEWER_LOCK
+    _VIEWER_LOCK = open(os.path.join(d, ".viewer.lock"), "w")
+    try:
+        fcntl.flock(_VIEWER_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        print(f"another viewer is already running on {d} -- not starting a second one", flush=True)
+        sys.exit(3)
     if a.subs is None:
         a.subs = "soft" if a.mode == "v2" else "burn"
     if a.player == "auto":
