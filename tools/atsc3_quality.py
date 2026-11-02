@@ -259,7 +259,15 @@ def player(live):
         if tel:
             out.update(out_s=int(tel.group(1)), stall_s=float(tel.group(2)), dropped=int(tel.group(3)),
                        fails=int(tel.group(4)), lag_s=int(tel.group(5)))
+    # Is anything being DRAWN? With the monitor powered off (DPMS) the compositor
+    # stops presenting VLC's window and almost every picture counts as lost --
+    # a measurement of the dark screen, not of the receiver. Record it.
+    if shutil.which("hyprctl"):
+        _, mon, _ = sh(["hyprctl", "monitors"], timeout=10)
+        st = re.findall(r"dpmsStatus: (\d)", mon)
+        out["display_on"] = any(s == "1" for s in st) if st else None
     rc, so, _ = sh(["pgrep", "-xa", "vlc"])
+    out["vlc_headless"] = "--vout=vdummy" in so
     m = re.search(r"--http-port (\d+) --http-password (\S+)", so)
     if m and shutil.which("curl"):
         def status():
@@ -308,8 +316,11 @@ def grade(r):
         g["captions"] = "FAIL" if cc["srt_age_s"] > CC_STALE_S else "WARN" if cc.get("cues_last_60s", 0) < CC_MIN_PER_MIN else "PASS"
     p = r["player"]
     if p.get("status") == "ok":
-        g["player"] = "FAIL" if p["vlc_state"] != "playing" or not p["playhead_advancing"] or p.get("vlc_hw_decode_failures") \
-            else "WARN" if p.get("stall_s", 0) > 0 or p.get("dropped", 0) else "PASS"
+        if p.get("display_on") is False and not p.get("vlc_headless"):
+            g["player"] = "DARK"      # monitor off: the player cannot be graded, and is not the receiver's fault
+        else:
+            g["player"] = "FAIL" if p["vlc_state"] != "playing" or not p["playhead_advancing"] or p.get("vlc_hw_decode_failures") \
+                else "WARN" if p.get("stall_s", 0) > 0 or p.get("dropped", 0) else "PASS"
     worst = "PASS"
     for v in g.values():
         if v == "FAIL": worst = "FAIL"
