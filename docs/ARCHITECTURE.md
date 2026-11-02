@@ -71,6 +71,7 @@ flowchart TD
     APPLY --> RB["<b>READ BOTH BACK</b><br/>readSetting + getGain"]
     RB --> OK{"match?"}
     OK -->|yes| GO["'gain confirmed by readback' &rarr; open the stream"]
+    GO --> BT["<b>ATSC3_BIAST=1</b> (2026-11-01): writeSetting biasT_ctrl<br/>&rarr; readSetting, logged 'wrote True, read back True'<br/>mismatch = RAISE. Antenna B's LNA only;<br/>the RSPdx bias-T does NOT survive a replug"]
     OK -->|no| RAISE["<b>GainReadbackError &mdash; RAISE</b><br/>not a warning to scroll past:<br/>on RF33 a wrong front end reads as<br/>0.0 % FEC with every other indicator healthy"]
 ```
 
@@ -377,7 +378,9 @@ flowchart TD
     AUD --> TV
     SUBS --> TV
     TV["<b>tools/atsc3_tv.py &mdash; THE MUX. A/V SYNC LIVES HERE, NOWHERE ELSE.</b><br/>per-chunk MPEG-TS (3 slots = 6.006 s), HEVC copied<br/>per-input <i>-itsoffset</i> + tfdt so every stream shares t=0<br/>ClockTrim servo (E50) &middot; LeadGovernor &middot; RespawnGuard<br/>audio frame-grid CARRY: lcm(1152,1536)=4608 so mp2 &amp; AC-3 butt-join (E48/E98)<br/>caption cues on the post-itsoffset clock (E95) &middot; stale-sub PTS filter (E45)"]
-    TV -->|"--mode v2"| VLC["<b>VLC tails the growing .ts file</b><br/>soft subs + eng/spa audio-track menu<br/><i>VLC cannot read a pipe on this box</i>"]
+    TV -->|"--mode v2"| VLC["<b>VLC tails the growing .ts file</b><br/>soft subs + eng/spa audio-track menu<br/><i>VLC cannot read a pipe on this box</i><br/>Linux (2026-11-01): <b>--avcodec-hw=none</b> (VDPAU froze the picture),<br/><b>--sub-track=0</b> (captions default ON), <b>--no-spdif</b>, ATSC3_VLC_EXTRA for A/B"]
+    LANES -.-> METER["<b>tools/atsc3_quality.py &mdash; the measuring apparatus</b><br/>chain FEC / x real time / overflows / readbacks<br/>video decoded from the fMP4 lane (fps, freezes, black, HDR)<br/>eng 5.1 per-channel dBFS: <b>centre = dialogue</b><br/>captions cues/min + staleness &middot; VLC pictures shown vs lost<br/>PASS/WARN/FAIL per row, --watch N --json"]
+    VLC -.->|"http status.xml"| METER
     TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied &middot; <b>5.1 main as AC-3 640k</b> + 2nd programme mp2 (E98)<br/>soft DVB captions ('t' toggles), audio programmes ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
     TV -->|"--mode v1"| FF1["<b>ffplay on a pipe, captions BURNED</b><br/>re-encodes every chunk (x264) = fidelity loss<br/>kept as the validated fallback only"]
 ```
@@ -557,6 +560,7 @@ flowchart TD
     JUDGE --> I4["(iv) no role restarted more than 4x/h"]
     JUDGE --> I5["(v) hourly A/V cross-correlation &gt; 0.95<br/>(vii) A/V PTS skew &lt; 2.0 s"]
     JUDGE --> I6["(vi) RF REFEREE, every 5 min"]
+    METER2["<b>atsc3_quality.py</b> &mdash; a referee for what the viewer GETS<br/>graded from the lanes and VLC's own counters;<br/>judges, never restarts (2026-11-01)"]
     HDHR["HDHomeRun FLEX 4K on the other splitter leg"] -.->|"lock + snq"| I6
 ```
 
