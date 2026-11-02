@@ -38,8 +38,8 @@ import m44_ldm as M44                                              # noqa: E402
 from atsc3 import bootstrap as bs                                  # noqa: E402
 
 PY = sys.executable
-FOX = os.path.join(HERE, "..", "data", "fox25",
-                   "rf25_fox_g4_0810_2254.cs16")
+FOX = os.environ.get("ATSC3_E85_FOX") or os.path.join(
+    HERE, "..", "data", "fox25", "rf25_fox_g4_0810_2254.cs16")
 RF33 = os.path.join(HERE, "rate6912_rf33.cs16")
 OUT = os.path.join(HERE, "e85_out")
 RATE = 6.912e6
@@ -93,14 +93,18 @@ def gate_identity(frames=80):
     print("\n  [1] pooled == serial, BYTE FOR BYTE, end to end")
     ser = run_ldm("serial", 0, frames=frames)
     pool = run_ldm("pooled", 4, frames=frames)
-    same = (ser["_sha"] is not None and ser["_sha"] == pool["_sha"])
+    # Two EMPTY outputs are identical too -- that is not the pool being right,
+    # it is the air being missing (2026-11-02: a too-weak capture passed this leg
+    # with the empty-file sha on both sides). Identity only counts with bytes.
+    same = (ser["_sha"] is not None and ser["_sha"] == pool["_sha"]
+            and os.path.getsize(ser["_dg"]) > 0)
     leg("the decoded datagram stream is unchanged by the pool", same,
         f"serial {ser['_sha']}\n             pooled {pool['_sha']}\n"
         f"             {os.path.getsize(ser['_dg'])} bytes both; "
         f"FEC {ser.get('bch_zero')}/{ser.get('blocks')} vs "
         f"{pool.get('bch_zero')}/{pool.get('blocks')}")
     leg("both paths decoded every Block BCH-clean",
-        ser.get("blocks") == ser.get("bch_zero") > 0
+        (ser.get("blocks") or 0) == (ser.get("bch_zero") or 0) > 0
         and pool.get("blocks") == pool.get("bch_zero") > 0,
         f"serial {ser.get('bch_zero')}/{ser.get('blocks')}, "
         f"pooled {pool.get('bch_zero')}/{pool.get('blocks')}")
@@ -292,6 +296,10 @@ def gate_realtime(n=3, frames=120, procs=4):
 
 
 def main():
+    for need in (FOX, RF33):
+        if not os.path.isfile(need):
+            print(f"GATE INVALID -- input missing: {need}  (cannot run is SKIP, never PASS)")
+            return 2
     ap = argparse.ArgumentParser()
     ap.add_argument("--baseline-sha", default=None)
     ap.add_argument("--skip", default="")

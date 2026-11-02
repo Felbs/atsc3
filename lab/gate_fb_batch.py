@@ -37,8 +37,13 @@ from atsc3_audio import LaneReader                               # noqa: E402
 
 
 def main():
-    lane = os.path.join(os.path.dirname(HERE),
-                        "data", "catchup", "live_audio_pid13.m4s")
+    # Any real 5.1 AC-4 lane will do (the gate is about the filterbank, not the
+    # programme): ATSC3_FB_LANE or argv[1] overrides the banked catch-up lane.
+    lane = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("ATSC3_FB_LANE")) or \
+        os.path.join(os.path.dirname(HERE), "data", "catchup", "live_audio_pid13.m4s")
+    if not os.path.isfile(lane):
+        print(f"GATE INVALID -- input missing: {lane}  (cannot run is SKIP, never PASS)")
+        return 2
     r = LaneReader(lane)
     frames = r.read_new()[:3000]                 # 100 s of real air
     dec = Ac4Stream()

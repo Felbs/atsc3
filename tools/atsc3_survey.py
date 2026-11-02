@@ -72,9 +72,22 @@ def log(m):
 
 
 def in_meteor_window(now=None):
+    """The radio reservation for meteor captures. Per box, from the
+    environment: ATSC3_METEOR_WINDOW=off disables it (a box with no meteor
+    job, e.g. the Omarchy desktop since 2026-11-02), HH:MM-HH:MM moves it;
+    unset keeps the historical 02:10-05:40."""
+    spec = os.environ.get("ATSC3_METEOR_WINDOW", "02:10-05:40").strip().lower()
+    if spec in ("off", "none", "0", ""):
+        return False
+    try:
+        a, b = spec.split("-")
+        lo = int(a.split(":")[0]) * 60 + int(a.split(":")[1])
+        hi = int(b.split(":")[0]) * 60 + int(b.split(":")[1])
+    except Exception:                                          # noqa: BLE001
+        lo, hi = 2 * 60 + 10, 5 * 60 + 40
     now = now or dt.datetime.now()
     mins = now.hour * 60 + now.minute
-    return 2 * 60 + 10 <= mins <= 5 * 60 + 40
+    return lo <= mins <= hi if lo <= hi else (mins >= lo or mins <= hi)
 
 
 def main():
@@ -87,7 +100,7 @@ def main():
     ap.add_argument("--force-meteor", action="store_true")
     a = ap.parse_args()
     if in_meteor_window() and not a.force_meteor:
-        log("REFUSING: inside the 02:10-05:40 meteor window.")
+        log(f"REFUSING: inside the {os.environ.get('ATSC3_METEOR_WINDOW', '02:10-05:40')} meteor window (ATSC3_METEOR_WINDOW=off disables it on a box with no meteor job).")
         return 3
     lo, hi = (int(x) for x in a.channels.split("-"))
     chans = list(range(lo, hi + 1))

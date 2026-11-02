@@ -40,13 +40,22 @@ import m11_stream as S            # noqa: E402
 
 
 def main():
-    fe = S.FrontEnd.__new__(S.FrontEnd)
+    # Build it through __init__ (it was __new__ + hand-set fields, which broke
+    # every time FrontEnd grew an attribute: E82 plan_cb/plan, then fast/
+    # fft_notch). fs_in = FS_POST means no resampler; the fields below are
+    # the gate's own overrides.
+    fe = S.FrontEnd(S.FS_POST)
     fe.ready = True
     fe.gen = 0
     fe.stats = __import__("collections").Counter()
     fe.tape = S.SampleTape()
     fe.tm = __import__("collections").Counter()
     fe.ex = None
+    # E82 (2026-08-11) added runtime geometry acquisition: frames() now
+    # consults plan_cb/plan first. This gate hand-builds the object, so it
+    # must set them too -- None = RF33's fixed constants, the case gated here.
+    fe.plan_cb = None
+    fe.plan = None
 
     # The lost cursor: `centre` measured against a tape that no longer exists.
     fe.centre = 10 ** 9
