@@ -167,5 +167,5 @@ written:
 
 | limit | number |
 |---|---|
-| full 5.1 AC-4 in real time | discrete-verified on all six channels, but **0.62x** even threaded — recordings only. Live runs the stereo pair at 1.27x |
-| PLP 1 live | the 64800 path is the cost; the demapper, not the LDPC, becomes the bottleneck |
+| ~~full 5.1 AC-4 in real time~~ | **CLOSED (E98, E109)**: the 5.1 main decodes live at 1.87x on the desktop (QMF kernel in C) and rides the mux as AC-3 640k; the stereo pair at 5–7x |
+| ~~PLP 1 live~~ | **CLOSED (M17, E82–E126)**: every Subframe decodes live; RF25's LDM Core layer is live television at 1.00x on six cores, 1.7x on 32 (docs/ARCHITECTURE.md s3b) |

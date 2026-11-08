@@ -5,6 +5,7 @@
 # (18:40-20:20 and 06:40-08:20 hold the RSPdx): 20:30 -> 06:30.
 #   bash tools/soak_overnight.sh [STOP_AT] [ANT] [LIVE_DIR]
 set -u
+unset PYTHONPATH   # 13.27: a PothosSDR py3.9 PYTHONPATH breaks radioconda's SoapySDR import
 STOP_AT=${1:-06:30}
 ANT=${2:-Antenna A}
 D=${3:-/c/captures/soak_night}

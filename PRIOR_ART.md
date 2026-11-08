@@ -2847,3 +2847,118 @@ viewer working; a stall with no fade in the chain log would be something else.
 the merge is a decision, not a fix.  Repo-root run outputs (`out*/`, `gate_*.log`, `e12x_*/`)
 are ignored since 8a411c6.  Left open: the A-CPL upmix (a decoder feature), the LDPC (the limit
 on every layout), and the Enhanced layer's antenna.
+
+### 13.27 Two of the three tests: the front end swept, Antenna B soaked -- and the supervisor caught restarting a healthy chain (2026-11-08)
+
+Felbs is away from the antennas, so the yagi stays where it points and the third test (aim it)
+waits.  The other two ran on the 32-core box while he was out: E129, a front-end sweep asking
+what the SDR's own knobs can still give the Enhanced layer with the antennas as they are, and a
+60-minute whole-stack soak on Antenna B, the morning's Antenna A soak (13.26) as the control.
+Code: the commit that carries this section (tools/atsc3_run.py, tools/atsc3_watch_av.py,
+tools/atsc3_capture.py); the architecture charts were brought to 13.26 in 4aa6648 (docs
+s3b draws the LDM path).
+
+**E129 -- the front end, 13 banks of 45 s.**  Antenna B (yagi + bias-T LNA) across IFGR 20-44
+and rfgain_sel 0-4 with the bias-T on and off, Antenna A as the control at rfgain_sel 0, 2, 4;
+each bank replayed at 8 x 2 with the E124 cell dump (every 10th batch) and the Core cancellation
+measured on it.  10:44-11:19, the carrier as it was then.
+
+| bank | antenna | IFGR | rfgain_sel | bias-T | Blocks (replay) | fit &#124;gain&#124; | Core-vs-noise | Enhanced own SNR | margin vs 12.5 |
+|---|---|---|---|---|---|---|---|---|---|
+| B_i32_g2_on | B | 32 | 2 | on | 3912/6370 | 0.933 | 5.36 dB | 0.36 dB | **-12.14 dB** |
+| B_i32_g2_off | B | 32 | 2 | off | 5086/6437 | 0.939 | 5.94 dB | 0.94 dB | -11.56 dB |
+| B_i20_g2_on | B | 20 | 2 | on | 2597/5600 | 0.942 | 6.13 dB | 1.13 dB | -11.37 dB |
+| B_i26_g2_on | B | 26 | 2 | on | 645/3595 | 0.941 | 6.14 dB | 1.15 dB | -11.35 dB |
+| B_i38_g2_on | B | 38 | 2 | on | 4511/5885 | 0.947 | 6.57 dB | 1.57 dB | -10.93 dB (best) |
+| B_i44_g2_on | B | 44 | 2 | on | 212/3314 | 0.927 | 4.87 dB | -0.13 dB | -12.63 dB |
+| B_i32_g0_on | B | 32 | 0 | on | **0/13542** | -- | no cells | -- | -- |
+| B_i32_g1_on | B | 32 | 1 | on | 5181/6403 | 0.935 | 5.69 dB | 0.69 dB | -11.81 dB |
+| B_i32_g3_on | B | 32 | 3 | on | 329/3414 | 0.932 | 4.64 dB | -0.36 dB | -12.86 dB |
+| B_i32_g4_on | B | 32 | 4 | on | 422/3651 | 0.925 | 4.72 dB | -0.28 dB | -12.78 dB |
+| A_i32_g2_off | A | 32 | 2 | off | 6197/6437 | 0.944 | 6.20 dB | 1.20 dB | -11.30 dB |
+| A_i32_g0_off | A | 32 | 0 | off | **0/13542** | -- | no cells | -- | -- |
+| A_i32_g4_off | A | 32 | 4 | off | **6377/6402** | 0.937 | 5.75 dB | 0.76 dB | -11.74 dB |
+
+Three things the table says.  (a) The margin is **flat**: -10.9 to -12.9 dB across every IFGR,
+every LNA state, bias-T on or off, both antennas -- a 2 dB spread on an 11-13 dB shortfall.  The
+front end is not the limit; the aperture is, as 13.25 said and E129 now measures.  (b) The
+carrier was weaker today than on the 13.25 bank: Core-vs-noise 4.6-6.6 dB against 8.9 dB then,
+Enhanced own SNR around 0-1.6 dB against 3.9.  The Core still decodes at 99.6 % on Antenna A at
+rfgain_sel 4 and 80 % on B at rfgain_sel 1; on B the LNA state matters for the Core (rfgain_sel
+3-4 = more attenuation: 10-12 % of Blocks) and not at all for the Enhanced margin.  (c) **rfgain_sel
+0 on either port decodes nothing** (0 of 13,542 Blocks) and the capture tool passed both banks
+as "no clipping": peak 32,753 of 32,767, -0.0 dBFS, yet under 0.001 % of samples near the rail.
+That is not clipping at the ADC; it is the front end overloading before it (E65 saw the same
+shape).  `tools/atsc3_capture.py` now prints a WARNING when a bank's peak sits within ~1 dB of
+the rail (>= 29,000) whatever the near-rail fraction says; the verdict line is unchanged.
+
+**The Antenna B soak, 11:27:35-12:32:54, Antenna A's morning soak as the control.**  Same
+script (`tools/soak_overnight.sh`, 8 x 2, raw queue 600, captions on), closed by the script at
+12:32:48 through `_tv/player.pid`: 13 processes to **0 leftovers** in 6 s.  The first attempt
+died at birth -- the E129 driver had exported the PothosSDR Python 3.9 `PYTHONPATH` for the
+capture tool, and under it radioconda could not import SoapySDR (`FATAL: no interpreter can
+import SoapySDR`); the soak runs with `env -u PYTHONPATH`.  The rerun:
+
+| | Antenna A, 08:00-09:38 (13.26) | Antenna B, 11:27-12:32 |
+|---|---|---|
+| chain restarts | **0** | **4** (11:43:44, 11:48:16, 11:55:54, 12:29:46) |
+| Frames | 23,638 at 1.00x | 15,154 in five runs (3827 / 931 / 1658 / 8148 / 590) at 0.97-1.00x |
+| FEC | 749,522/815,616 = 91.9 % | 380,101/496,572 = **76.5 %** |
+| CTI lock losses | 25, all re-acquired | 53 |
+| viewer | 950 chunks, 5,700 s out, **0 dropped**, 0 fails | 552 chunks, 3,255 s out, **21 dropped**, 0 fails |
+| worst player write / stall | 16.6 s / 19.2 s (full pipe after a fade, 13.26) | 12.4 s / 12.1 s; lag peaked at **202 s** |
+| audio (eng) | 132,979 frames, 18 bad, 11,201 pads | 36,159 frames, 17 bad, 16,462 pads, 6.0x |
+| captions | 6,600-line srt | 136-line srt; the caption worker died once (rc=1, 11:41:35), respawned |
+| memory (stack working set) | 6.3-6.7 GB, flat | 5.4-7.0 GB, flat |
+| leftovers at close | 0 | 0 |
+
+The weaker carrier is the sky's; everything else in the right-hand column follows from the four
+restarts, and those were ours.  Each one cost a black screen of 59, 70, 75 and 78 s (restart to
+the viewer's `lane generation N -> N+1`) -- 4.7 of the 65 minutes -- and the 21 dropped chunks
+are one event: at 11:54:56 the viewer found itself 154 s behind the head after the second and
+third restarts stacked, re-anchored (E114) and dropped the backlog.  Before each restart the
+chain was **processing Frames at 0.97-0.99x and probing the CTI phase** -- the E115 tracker doing
+what it does on a fade -- and the supervisor killed it.
+
+**Why: the fade detector never saw an LDM status line.**  `atsc3_run.py` learnt on 8/09 (E63, 41
+restarts in one night) that a fade is not a wedge: when the lanes stop growing it reads the
+chain's own status lines and, if the Frames advance while the last minute's FEC is under 20 %,
+waits instead of restarting.  Its parser looked for the non-LDM line's `[xx.x% now]` field.
+The LDM line (`lab/m11_watch.py`) prints `FEC conv/total BCH0 [phase locked]` and no `% now`
+-- so on RF25, since E82, `chain_status()` returned `(None, None)`, the fade branch was skipped,
+and every plateau of the lanes longer than 3 strikes + 4 grace at 5 s = **35 s** was "WEDGED and
+did not self-heal -- restarting".  Antenna A's 25 lock losses all re-acquired inside 35 s;
+Antenna B's did not, four times.  And we could not read the supervisor's verdicts afterwards,
+because the orchestrator spawned it (and the caption worker) with stdout on DEVNULL -- the four
+"why"s and the caption worker's traceback went nowhere.
+
+Two fixes, both refereed off air.  (1) `chain_status()` parses the LDM counters too: the
+interval FEC is the difference of `conv/total` over the window, and the window is the quiet
+stretch being judged, (strikes + grace) x check seconds, not a fixed 60 s.  Refereed on the B
+soak's own chain.log, cut at each of the four restart instants, asking what the supervisor would
+have read:
+
+| window | restart 1 | restart 2 | restart 3 | restart 4 | verdict |
+|---|---|---|---|---|---|
+| before 13.27 | (None, None) | (None, None) | (None, None) | (None, None) | wedge path, all four |
+| 60 s (12 lines) | 29.5 % | 20.6 % | 17.0 % | 26.2 % | one "fade -> wait" of four |
+| **35 s (7 lines)** | 21.0 % | 6.7 % | 7.6 % | 14.3 % | **three of four wait** |
+
+The locked minute before a 35 s plateau dilutes a 60 s average above the 20 % line; the 35 s
+window reads the plateau itself.  Restart 1 stays on the wedge path at 21.0 % -- and its lanes
+WERE growing in the last 10 s before the kill (MPU 1166 -> 1168), so a different branch of the
+supervisor fired there, most likely `LANE(S) DEAD` on a lane that was quiet while a sibling
+wrote.  That one is not resolved by this section; it will be read, because of fix (2): quiet
+children now append to `<live-dir>/<worker>.log` (`atsc3_run.log`, `atsc3_subs.log`) instead of
+DEVNULL.  The non-LDM `% now` path is unchanged (synthesized log: 93.0 %); a log with no status
+lines still returns `(None, None)`.  Gate: the whole stack on a replay of A_i32_g4_off through
+the orchestrator -- `atsc3_run.log` carries the supervisor's four lines ending `replay finished
+(chain rc=0) -- done` and `0 restart(s)`, `atsc3_subs.log` exists, the viewer and workers came
+down with the chain, rc 0, 0 leftovers.
+
+**Where it stands.**  The Enhanced layer is antenna, now with a 13-bank table under the word.
+The supervisor no longer restarts an LDM chain for re-acquiring; tonight's overnight soak
+(Antenna A, 20:30-06:30, the same script) runs the fixed supervisor and keeps its log, and the
+first thing to read tomorrow is `soak_night/atsc3_run.log`.  Left open: restart 1's branch, the
+caption worker's rc=1 (both answered by the logs from now on), the A-CPL upmix, the LDPC, and
+the yagi, which needs a person.

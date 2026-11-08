@@ -137,6 +137,16 @@ if frac > 0.001 or peak >= 32767:
     print(f"  CLIPPED -> VOID. Re-run with more attenuation "
           f"(--rfgain higher, and/or --ifgr higher).")
     ok = False
+elif peak >= 29000:
+    # E129 (13.27): two banks at LNA state 0 peaked at 32753 with <0.001 % of
+    # samples near the rail, passed this check, and decoded 0 Blocks -- the
+    # overload was BEFORE the ADC (compression / intermodulation in the
+    # front end), which leaves no clipping signature.  Not a VOID, since
+    # nothing proves the samples wrong; a warning, since E65 and E129 both
+    # found that a peak this close to the rail never decoded.
+    print(f"  no clipping -- but the peak is within 1 dB of the rail: the "
+          f"front end is likely overloaded upstream of the ADC (E65/E129); "
+          f"expect a poor decode and bank a higher --rfgain too")
 else:
     print(f"  no clipping")
 print(f"  VERDICT: {'USABLE' if ok else 'VOID -- do not bank this'}")

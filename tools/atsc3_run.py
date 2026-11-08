@@ -159,11 +159,28 @@ def chain_status(live_dir, since_off=0, n=12):
     except OSError:
         return None, None
     rows = re.findall(r"([\d.]+)s\s+(\d+) Frames.*?\[\s*([\d.]+)% now\]", txt)
+    if rows:
+        tail = rows[-n:]
+        frames = int(tail[-1][1])
+        fec = sum(float(r[2]) for r in tail) / len(tail)
+        return frames, fec
+    # 13.27: the LDM status line (lab/m11_watch.py) prints no "% now" -- it
+    # carries the CUMULATIVE counters "FEC conv/total BCH0 [phase ...]".  For
+    # three months this function returned (None, None) on RF25, the fade
+    # branch below never ran, and every 35 s plateau of the lanes (3 strikes
+    # + 4 grace at 5 s) was called WEDGED: four restarts in the 60-minute
+    # Antenna B soak of 2026-11-08, each a ~65 s black screen, on a chain
+    # whose phase tracker re-acquires by itself.  The interval FEC is the
+    # difference of the counters over the window; no new Blocks judged while
+    # the Frames still advance reads as 0 % = the air, not the code.
+    rows = re.findall(r"([\d.]+)s\s+(\d+) Frames.*?FEC (\d+)/(\d+) BCH0", txt)
     if not rows:
         return None, None
-    tail = rows[-n:]
+    tail = rows[-(n + 1):]
     frames = int(tail[-1][1])
-    fec = sum(float(r[2]) for r in tail) / len(tail)
+    d_conv = int(tail[-1][2]) - int(tail[0][2])
+    d_tot = int(tail[-1][3]) - int(tail[0][3])
+    fec = 100.0 * d_conv / d_tot if d_tot > 0 else 0.0
     return frames, fec
 
 
@@ -419,6 +436,14 @@ def main():
         fade_logged = 0.0
         gs = []                   # gain-step timestamps (E73)
         last_gain = 0.0
+        # 13.27: the fade question is asked about the stretch the lanes have
+        # been quiet -- (strikes + grace) checks -- so that is the window the
+        # FEC is read over (the chain writes one status line per 5 s).  A
+        # fixed 60 s let the locked minute before a 35 s plateau dilute the
+        # average above FADE_FEC: refereed on the Antenna B soak's log, 60 s
+        # read 29.5 / 20.6 / 17.0 / 26.2 % at the four cuts, 35 s reads
+        # 21.0 / 6.7 / 7.6 / 14.3 %.
+        fade_n = max(3, int(round((a.strikes + a.grace) * a.check / 5.0)))
         log(f"  supervising -- live dir {a.live_dir}")
         try:
             while True:
@@ -510,7 +535,7 @@ def main():
                     # cures nothing and costs a fresh acquisition, so wait
                     # -- but not forever: probe once per FADE_MAX_S in case
                     # our own acquisition, not the sky, is what is stuck.
-                    fr, fec = chain_status(a.live_dir, log_off)
+                    fr, fec = chain_status(a.live_dir, log_off, n=fade_n)
                     if fr is not None and fec is not None and fec < FADE_FEC:
                         alive_now = fr != last_frames
                         last_frames = fr

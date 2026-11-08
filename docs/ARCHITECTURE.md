@@ -161,7 +161,7 @@ the one that ships.
 ```mermaid
 flowchart TD
     IN["one frame's cell pool"]
-    IN --> SEL{"--accel<br/><i>choices: cpu | gpu | gpu-full</i><br/>default gpu-full; production pins <b>cpu</b>"}
+    IN --> SEL{"--accel<br/><i>choices: cpu | gpu | gpu-full</i><br/>default: gpu-full if CUDA is present, else cpu (<i>_default_accel</i>)<br/>production pins <b>cpu</b>; the LDM pool (3b) ignores this flag"}
 
     SEL -->|"gpu-full"| GF["<b>fused GPU path</b><br/>CPE + HTI + demap + bit-deinterleave<br/>+ LDPC, all on the device"]
     SEL -->|"gpu"| GH["CPU front end, GPU LDPC only"]
@@ -185,6 +185,48 @@ flowchart TD
     EXACT --> LDPC
     LDPC --> OUT["BCH + descramble &rarr; baseband packets"]
 ```
+
+## 3b. The LDM path (RF25) — one Frame in, two layers out, forever
+
+RF33 is one layer with an intra-Frame interleaver: Frames are independent and
+the engine above is enough.  RF25 is Layered-Division Multiplexing with a
+CONVOLUTIONAL time interleaver whose commutator never resets, so a FEC Block is
+a diagonal through ~two Frames and the whole stream hangs on one PHASE.  That
+needed its own stage (`lab/m44_ldm.py`, E82 → E126), drawn here as it ran for
+95 minutes on 2026-11-08 (PRIOR_ART s13.26).
+
+```mermaid
+flowchart TD
+    L1["<b>L1-Detail</b> &rarr; the plan<br/>8K FFT &middot; GI 512 &middot; SP12_4 &middot; 189 symbols<br/>PLP0 QPSK 9/15 + PLP16 QPSK 2/15 = <b>Core</b><br/>PLP1 256QAM-NUC 7/15 = <b>Enhanced</b><br/>injection <b>index 10 = 5.0 dB</b> (a table, not dB)"]
+    L1 --> POOL
+
+    subgraph POOL["<b>LdmDemodPool</b> &mdash; N processes &times; T threads (8 &times; 2 on 32 cores, 2 &times; 2 on 6), shared-memory slots, strict dispatch order"]
+        direction TB
+        DEM["<b>Frame demod</b> &mdash; FFT, pilot grid,<br/>channel estimate (boxcar W=12 over the pilots,<br/>per-symbol gains), equalise 1.2 M cells"]
+        CORE["<b>Core cells</b> &rarr; demap &rarr; <b>layered LDPC</b> (E107, eight lanes,<br/>two-minimum correction E110) &rarr; BCH"]
+        CANC["<b>Core cancellation</b> &mdash; decoded Blocks re-encoded,<br/>re-mapped, fitted (|gain| 0.96) and subtracted:<br/>the residual IS the Enhanced layer + noise"]
+        DEM --> CORE --> CANC
+    end
+
+    POOL --> CTI["<b>streaming CTI de-interleaver</b><br/>1024 rows, delay lines 0.92 Frame deep,<br/>a continuous index space anchored on <i>start_row</i>"]
+    CTI --> PHASE{{"<b>phase tracker</b> (E115)<br/>candidate start_row from L1 each Frame;<br/>PROVISIONAL until 4 FEC Blocks judge it;<br/>lost on FEC collapse &rarr; sweep &plusmn;6 Frames,<br/>re-acquire from the HELD window"}}
+    PHASE --> FEC["Core FEC Blocks &rarr; ALP &rarr; IP &rarr; MMTP lanes<br/>(video 5017 &middot; audio 5018 eng / 5019 spa &middot; captions 5020)"]
+    CANC -.-> ENH["<b>Enhanced layer</b> &mdash; E124 measures it on air:<br/>Core-vs-noise 8.9 dB, Enhanced own SNR <b>3.9 dB</b> against ~12.5 needed.<br/>Decodes through the same canceller on synthesized signal (E122);<br/>on this air it is <b>8.6 dB of antenna</b> away, not code"]
+
+    MAIN["main thread per Frame: CTI gather 50 ms, pool_wait 90 ms &mdash;<br/>the pool's rate is the LDPC's (75-85 % of every worker-second);<br/>fatter processes lower demod time and lose it to FEC queueing (E128)"]
+    POOL -.-> MAIN
+
+    classDef meas fill:#048,stroke:#024,color:#fff
+    classDef open fill:#a33,stroke:#611,color:#fff
+    class PHASE meas
+    class ENH open
+```
+
+What the chart measures, not asserts: identity across layouts is a gate
+(`gate_e123_relock`: same Blocks, byte-identical lanes, same final lock at 2×2
+through 8×2 and every FEC split); the phase tracker's 25 lock losses in the
+95-minute soak were all inside carrier fades and all re-acquired; the engine
+flag does not reach the pool (identical timers at `cpu`, `gpu`, `gpu-full`).
 
 ### The GIL law
 
@@ -369,10 +411,10 @@ amount of the work.
 
 ```mermaid
 flowchart TD
-    ORCH["<b>ONE COMMAND</b> &mdash; <i>tools/atsc3_watch_av.py --rf N [--lang spa] [--cc]</i><br/>wires the workers below, cleans stale lanes FIRST,<br/>tears the whole tree down when the window closes"]
-    ORCH --> CHAIN["<b>chain</b> &mdash; <i>atsc3_run --assets all</i><br/>owns the single-tenant radio<br/>&rarr; video + audio(pid13/14) + caption(pid15) lanes"]
-    CHAIN --> LANES["<b>fMP4 lanes</b> + live.json + per-lane .idx<br/>every lane shares first_seq = ONE media origin"]
-    LANES --> AUD["<b>AC-4 audio worker</b> &mdash; our decoder<br/><i>tools/atsc3_audio.py</i> &rarr; live_audio.wav<br/>eng pid13 element 5_X &middot; spa pid14 element pair<br/>stereo pair keeps up live (1.27x); 6ch is 0.62x"]
+    ORCH["<b>ONE COMMAND</b> &mdash; <i>tools/atsc3_watch_av.py --rf N [--lang spa] [--cc]</i><br/>wires the workers below, cleans stale lanes FIRST,<br/>waits for live.json and takes the lanes and their LANGUAGES from it (13.26),<br/>every child in a kill-on-close Job Object (Windows) / SIGTERM &rarr; finally (Linux):<br/>the tree dies with the window, with Ctrl-C, and with a kill from outside;<br/>chain gone &rarr; shut down, respawn nothing"]
+    ORCH --> CHAIN["<b>chain</b> &mdash; <i>atsc3_run --assets all</i><br/>owns the single-tenant radio; a replay (<i>--capture</i>) ends when the file does<br/>&rarr; video + audio + caption lanes, named by pid"]
+    CHAIN --> LANES["<b>fMP4 lanes</b> + live.json + per-lane .idx<br/>every lane shares first_seq = ONE media origin<br/>each lane says its <b>lang</b>: the init's mdhd (MMTP) or the SLS @lang (ROUTE)<br/>RF33: 13 eng &middot; 14 spa &middot; 15 eng &mdash; RF25: 5018 eng &middot; 5019 spa &middot; 5020 eng"]
+    LANES --> AUD["<b>AC-4 audio worker</b> &mdash; our decoder<br/><i>tools/atsc3_audio.py</i> &rarr; live_audio.wav (+ .json sidecar)<br/>eng = the lane that DECLARES eng (pid order only when unsaid)<br/>ASPX_ACPL_3 (RF25's '5.1' = 2-ch core + A-CPL): L/R decoded,<br/>sidecar says <i>channels_coded 2</i>; the A-CPL upmix is not built"]
     LANES --> SUBS["<b>caption worker</b><br/><i>tools/atsc3_subs.py</i> &mdash; TTML &rarr; growing live.srt<br/>+ an EXACT anchor slot in a sidecar"]
     LANES --> TV
     AUD --> TV
@@ -381,7 +423,7 @@ flowchart TD
     TV -->|"--mode v2"| VLC["<b>VLC tails the growing .ts file</b><br/>soft subs + eng/spa audio-track menu<br/><i>VLC cannot read a pipe on this box</i><br/>Linux (2026-11-01): <b>--avcodec-hw=none</b> (VDPAU froze the picture),<br/><b>--sub-track=0</b> (captions default ON), <b>--no-spdif</b>, ATSC3_VLC_EXTRA for A/B"]
     LANES -.-> METER["<b>tools/atsc3_quality.py &mdash; the measuring apparatus</b><br/>chain FEC / x real time / overflows / readbacks<br/>video decoded from the fMP4 lane (fps, freezes, black, HDR)<br/>eng 5.1 per-channel dBFS: <b>centre = dialogue</b><br/>captions cues/min + staleness &middot; VLC pictures shown vs lost<br/>PASS/WARN/FAIL per row, --watch N --json"]
     VLC -.->|"http status.xml"| METER
-    TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied &middot; <b>5.1 main as AC-3 640k</b> + 2nd programme mp2 (E98)<br/>soft DVB captions ('t' toggles), audio programmes ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
+    TV -->|"--mode v2 --player ffplay"| FF["<b>ffplay on a pipe</b> (pipe:0) &mdash; THE DESKTOP PATH<br/>HEVC copied &middot; <b>5.1 main as AC-3 640k</b>, or <b>stereo mp2 when the stream codes two</b> (13.26) + 2nd programme mp2 (E98)<br/>soft DVB captions ('t' toggles), audio programmes ('a')<br/>PipeFeed thread: a stalled player is an EVENT, never a wedge (E97)<br/>TsStitch: continuity counters rewritten across chunk seams (E97)<br/>telemetry.jsonl every chunk"]
     TV -->|"--mode v1"| FF1["<b>ffplay on a pipe, captions BURNED</b><br/>re-encodes every chunk (x264) = fidelity loss<br/>kept as the validated fallback only"]
 ```
 
@@ -753,7 +795,10 @@ Three more habits worth stealing:
 | Threadripper 2990WX | gpu-full | 1.48x | optional accelerator, never required |
 | Ryzen 1600X (6-core) | CPU only | 1.02x live | full TV including the viewer (E56) |
 | Pi-5 class | CPU only | ~1.2–2x **estimated** | not measured on hardware |
-| RF25 LDM/CTI path | CPU only | **0.48x** | in progress; blocks the live Fox trial |
+| ~~RF25 LDM/CTI path~~ | ~~CPU only~~ | ~~**0.48x**~~ | superseded below (E82 → E126) |
+| Threadripper 2990WX, RF25 LDM | CPU, pool 8 × 2 | **1.68–1.70x** replay (5 runs, two interpreters); 1.00x live with headroom 5.6x | 95-minute soak 0 dropped chunks; 1.31x on two earlier nights was the box, not the code (13.26) |
+| Ryzen 1600X (6-core), RF25 LDM | CPU, pool 2 × 2 | **1.00x live** sustained, 0 shed | strong night (13.24); 0.93x on marginal air |
+| RTX 4090 engine, RF25 LDM | gpu-full | 1.57–1.59x | the pool ignores the engine; the GPU front end is 7 % slower than the CPU's here and converges 14 more Blocks of 5986 |
 
 AC-4 output rates, measured: stereo `--channels 2` runs 1.27x and keeps up
 live; full 5.1 `--channels 6` runs 0.62x even threaded and is therefore
@@ -776,7 +821,7 @@ Other carriers reached from this site:
 
 | carrier | what it is | status |
 |---|---|---|
-| RF25 | Fox Baltimore 45.100, **LDM core layer** | decoded 100.0 % (6962/6962) offline and through the live chain on banked air; live trial pending real-time |
+| RF25 | **LDM**: Core layer PLP0 (QPSK 9/15) + PLP16 (QPSK 2/15); Enhanced layer PLP1 (256QAM-NUC 7/15), injection 5.0 dB | **Core: live television with the viewer** (video 5017, audio 5018 eng / 5019 spa, captions 5020), 1.00x, 95-minute soak 0 dropped (13.25–13.26). **Enhanced: not decoded from air** — own SNR 3.9 dB vs ~12.5 needed after a measured-perfect Core cancellation; decodes on synthesized signal (E122); the gap is antenna gain |
 | RF30 | LDM, core carries datacast + GNSS RTK + LLS | core decoded 740/740; both TV services ride the **enhanced** layer, measured 9.3 dB out of reach |
 
 ---
