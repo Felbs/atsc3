@@ -77,10 +77,20 @@ credit is owed and because a reader may want to compare the two.
     strong carriers, and on marginal signal it crosses the threshold the
     interleaver lock needs -- "never locks" becomes "locks".
 
+    Sixteen narrow lanes per vector in the layered LDPC (E130/E131, our
+    lab/ldpc_layered_kernel.c): their atsc3_ldpc.cpp runs sixteen 8-bit
+    lanes.  We built the 8-bit version from the min-sum rule and measured
+    it losing 11-44 % of the Blocks at the cliff (no correction, a coarse
+    step), so what ships is sixteen 16-bit lanes with the correction kept
+    -- the lane count is the borrowed idea; the arithmetic is ours.
+    Measured: no Block lost, more converged at 12 dB, 30 % less time per
+    record, and the whole chain 1.87x -> 2.04x (RF33) and 2.23x -> 2.51x
+    (RF25) on the 32-core box.
+
     Decoding every Subframe live rather than one (our lab/m17_plp1_live.py).
     Not a technique; a prompt.  They did it, so we built it.
 
-  That is the whole of it: three techniques and one prompt, each measured
+  That is the whole of it: four techniques and one prompt, each measured
   above and in PRIOR_ART.md s13.  The receiver -- bootstrap through picture,
   the AC-4 decoder, the LDM canceller and pool, the viewer, the gates -- is
   ours, and predates our knowledge of OnAir (dates above).

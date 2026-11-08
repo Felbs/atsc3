@@ -93,7 +93,7 @@ def _retune_tracker(fe, plan, full_window=False):
     fe.ft.reset()
 
 
-def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
+def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg, idx=0):
     """One decode worker PROCESS (E52).
 
     Python threads cannot scale this decoder past ~1.2x on any core count:
@@ -110,6 +110,24 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
     import traceback as tb
     try:
         os.environ.setdefault("M9_NO_TORCH", "1")
+        # 13.29: ATSC3_WORKER_SPREAD=G pins worker idx to logical-CPU group
+        # idx mod G.  Measured on the 3970X: a worker's LDPC takes 62 ms
+        # alone, 226 ms with eight running, and four workers packed into one
+        # core complex run 1.8x slower than four spread one per complex --
+        # cache contention, which the scheduler does not avoid by itself.
+        # Placement only; the decoded bytes do not depend on it.
+        spread = os.environ.get("ATSC3_WORKER_SPREAD")
+        if spread:
+            try:
+                import psutil
+                groups = max(1, int(spread))
+                ncpu = os.cpu_count() or 1
+                per = max(1, ncpu // groups)
+                g = idx % groups
+                psutil.Process().cpu_affinity(
+                    list(range(g * per, min(ncpu, (g + 1) * per))))
+            except Exception:                                  # noqa: BLE001
+                pass
         from multiprocessing import shared_memory
         import numpy as np
         import m9_fast
@@ -146,8 +164,22 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
             if sf1 is not None:
                 rep1 = {}
                 pkts1, rep1 = sf1.decode(buf[slot, :n], t0, rep1)
+                # E133: bank the Frame window + t0 of every Frame that left a PLP 1 Block
+                # unconverged, for the offline comparison with the standalone decoder.
+                _sd = os.environ.get("ATSC3_SF1_DUMP")
+                if _sd and rep1.get("converged", 0) < rep1.get("n_fec", 0):
+                    try:
+                        os.makedirs(_sd, exist_ok=True)
+                        np.savez(os.path.join(_sd, f"sf1_{idx:05d}.npz"), y=np.asarray(buf[slot, :n]), t0=int(t0),
+                                 idx=int(idx), converged=int(rep1["converged"]), n_fec=int(rep1["n_fec"]),
+                                 bad_fail=np.asarray(rep1.get("bad_fail", []), int))
+                    except Exception as _ex:                           # noqa: BLE001
+                        print(f"[E133 sf1 dump] {_ex!r}", file=sys.stderr, flush=True)
                 diag1 = dict(converged=rep1["converged"], bch_ok=rep1["bch_ok"],
-                             n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0))
+                             n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0),
+                             **{k: rep1[k] for k in ("cfo_resid_hz", "cfo_applied_hz", "ldpc_iters_mean",
+                                                      "ldpc_iters_max", "data_coherence_mean", "bad_fail",
+                                                      "timing_shift") if k in rep1})
             out_q.put(("ok", (idx, slot, pkts,
                               dict(converged=diag["converged"],
                                    bch_ok=diag["bch_ok"]),
@@ -404,7 +436,7 @@ class Watch:
         self.procs = [ctx.Process(
             target=_decode_proc_main,
             args=(self.shm.name, self.nslots, self.slot_len, self.d_in,
-                  self.d_out, cfg), daemon=True) for _ in range(n)]
+                  self.d_out, cfg, i), daemon=True) for i in range(n)]
         t = time.time()
         for p in self.procs:
             p.start()
@@ -666,7 +698,9 @@ class Watch:
             rep1 = {}
             pkts1, rep1 = self.sf1.decode(w, t0, rep1)
             diag1 = dict(converged=rep1["converged"], bch_ok=rep1["bch_ok"],
-                         n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0))
+                         n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0),
+                         **{k: rep1[k] for k in ("cfo_resid_hz", "cfo_applied_hz", "ldpc_iters_mean",
+                                                  "ldpc_iters_max", "data_coherence_mean", "bad_fail") if k in rep1})
         return pkts, diag, time.perf_counter() - t, coh, pkts1, diag1
 
     def _decode_done(self, res):
@@ -726,7 +760,12 @@ class Watch:
             self.bb_abs1 += len(stream1)
             if os.environ.get("ATSC3_PLP1_LOG"):
                 print(f"  PLP1LOG frame {self.n_frames} converged {diag1['converged']}/{diag1['n_fec']} "
-                      f"bch {diag1['bch_ok']} comb {diag1.get('comb_used', 0)}", file=sys.stderr, flush=True)
+                      f"bch {diag1['bch_ok']} comb {diag1.get('comb_used', 0)} "
+                      f"cfo {diag1.get('cfo_resid_hz', 0.0):+.2f}/{diag1.get('cfo_applied_hz', 0.0):+.2f} Hz "
+                      f"its {diag1.get('ldpc_iters_mean', 0.0):.1f}/{diag1.get('ldpc_iters_max', 0)} "
+                      f"coh {diag1.get('data_coherence_mean', 0.0):.3f} "
+                      f"tshift {diag1.get('timing_shift', 0):+d} "
+                      f"bad {diag1.get('bad_fail', [])}", file=sys.stderr, flush=True)
             with self.lock:
                 self.n_conv1 += diag1["converged"]
                 self.n_bch1 += diag1["bch_ok"]

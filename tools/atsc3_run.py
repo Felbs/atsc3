@@ -87,6 +87,10 @@ RADIO_YIELD_PAT = ("radio held by", "not seizing", "REFUSING: inside")
 
 
 FADE_FEC = 20.0            # 1-min FEC mean under this = the air is gone
+#: 13.30: a lane that stops while siblings write is a dead ASSET only when the
+#: carrier is healthy; under this interval FEC it is the air (seen live: audio
+#: lanes paused through a 65 % fade while video and captions kept writing).
+LANE_DEAD_FEC = float(os.environ.get("ATSC3_LANE_DEAD_FEC", "90"))
 FADE_MAX_S = 1800.0        # patience bound: probe once per 30 min anyway
 LDM_STARTUP = 90.0         # LDM cold start (prewarm+acquire+lock+1st seg)
 #                            runs ~50-60 s to first byte -- the flat 45 s
@@ -509,6 +513,16 @@ def main():
                                 if v == last_lanes.get(k, -1)]
                         alive = len(lanes) - len(dead)
                         if dead and alive:
+                            # 13.30: an asset is dead only in a healthy carrier
+                            _fr, _fec = chain_status(a.live_dir, log_off, n=fade_n)
+                            if _fec is not None and _fec < LANE_DEAD_FEC:
+                                if time.time() - fade_logged > 300:
+                                    fade_logged = time.time()
+                                    log(f"  lane(s) quiet ({', '.join(sorted(dead))}) in a "
+                                        f"degraded carrier (FEC {_fec:.0f}% over the window) "
+                                        f"-- the air, not a dead asset; waiting")
+                                last_lanes = lanes
+                                continue
                             strikes += 1
                             log(f"  LANE(S) DEAD: {', '.join(sorted(dead))} "
                                 f"unchanged while {alive} lane(s) still write "

@@ -1039,7 +1039,8 @@ class FrameDemod:
         spare = pre[g.l1b_cells + g.l1d_cells:]
 
         step, gi = cp["step"], cp["gi"]
-        base = y[t0 + cp["data_off"] + gi:]
+        # E135 probe: a fixed shift of the data FFT windows (samples), to measure the timing plateau
+        base = y[t0 + cp["data_off"] + gi + int(os.environ.get("ATSC3_LDM_TSHIFT", "0")):]
         need = (g.nsym - 1) * step + g.nfft
         if len(base) < need:
             raise RuntimeError(f"window short: {len(base)} < {need}")
@@ -1655,6 +1656,22 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
     import traceback
     from concurrent.futures import ThreadPoolExecutor
     from multiprocessing import shared_memory
+    # 13.29: ATSC3_WORKER_SPREAD=G pins this worker to logical-CPU group
+    # (cfg idx) mod G -- cache contention between workers, measured on the
+    # RF33 path (m11_watch._decode_proc_main has the numbers).  Placement
+    # only; the cells and Blocks do not depend on it.
+    _spread = os.environ.get("ATSC3_WORKER_SPREAD")
+    if _spread:
+        try:
+            import psutil
+            _groups = max(1, int(_spread))
+            _ncpu = os.cpu_count() or 1
+            _per = max(1, _ncpu // _groups)
+            _g = int(cfg.get("idx", 0)) % _groups
+            psutil.Process().cpu_affinity(
+                list(range(_g * _per, min(_ncpu, (_g + 1) * _per))))
+        except Exception:                                      # noqa: BLE001
+            pass
     import numpy as np
     try:
         os.environ.setdefault("M9_NO_TORCH", "1")
@@ -1843,10 +1860,11 @@ class LdmDemodPool:
                                      self.win_len, self.cell_len,
                                      self.blk_len, q, self.out_q,
                                      spec, cfg), daemon=True)
-        self.procs = ([_proc(self.in_q, dict(threads=self.threads, iters=self.iters, role=role_d))
-                       for _ in range(self.nproc)]
-                      + [_proc(self.fec_q, dict(threads=self.fec_threads, iters=self.iters, role="fec"))
-                         for _ in range(self.nfec)])
+        self.procs = ([_proc(self.in_q, dict(threads=self.threads, iters=self.iters, role=role_d, idx=i))
+                       for i in range(self.nproc)]
+                      + [_proc(self.fec_q, dict(threads=self.fec_threads, iters=self.iters, role="fec",
+                                                idx=self.nproc + i))
+                         for i in range(self.nfec)])
         t0 = time.time()
         for p in self.procs:
             p.start()

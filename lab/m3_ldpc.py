@@ -731,7 +731,7 @@ def _layered_lib():
                 cand = ctypes.CDLL(path)
                 cand.ldpc_layered_abi.restype = ctypes.c_int32
                 abi = int(cand.ldpc_layered_abi())
-                if abi not in (3, 4):
+                if abi not in (3, 4, 5, 6):
                     raise OSError("layered kernel ABI mismatch (rebuild: python lab/build_ldpc_layered_kernel.py)")
                 i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
                 f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
@@ -747,6 +747,26 @@ def _layered_lib():
                 if cand.has_pack:
                     cand.ldpc_layered_pack_f32.restype = ctypes.c_int32
                     cand.ldpc_layered_pack_f32.argtypes = cand.ldpc_layered_f32.argtypes
+                # E130: ABI 5 adds the sixteen-lane int8 kernel
+                cand.has_q8 = abi >= 5
+                if cand.has_q8:
+                    i8 = np.ctypeslib.ndpointer(np.int8, flags="C")
+                    cand.ldpc_layered_q8.restype = ctypes.c_int32
+                    cand.ldpc_layered_q8.argtypes = [
+                        f32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                        ctypes.c_int32, i32, i32, ctypes.c_int32, ctypes.c_float,
+                        ctypes.c_float, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                        u8, u8, i32, i32, i8]
+                # E131: ABI 6 adds the sixteen-lane int16 kernel with the correction
+                cand.has_q16 = abi >= 6
+                if cand.has_q16:
+                    i16 = np.ctypeslib.ndpointer(np.int16, flags="C")
+                    cand.ldpc_layered_q16.restype = ctypes.c_int32
+                    cand.ldpc_layered_q16.argtypes = [
+                        f32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                        ctypes.c_int32, i32, i32, ctypes.c_int32, ctypes.c_float,
+                        ctypes.c_float, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                        ctypes.c_int32, u8, u8, i32, i32, i16]
                 lib = cand
             except OSError as ex:
                 if not _LAYERED_STATE["logged"]:
@@ -794,6 +814,24 @@ def l1_min_sum_decode(llr, checks, n, iters=50, alpha=0.75):
 #: off) -- a pool change, not a kernel one.  OFF until that lands;
 #: ATSC3_LDPC_PACK=1 turns it on.
 PACK_DEFAULT = os.environ.get("ATSC3_LDPC_PACK", "0") == "1"
+#: E130: the sixteen-lane int8 kernel.  "0" off; "1" = HYBRID (int8 first, the
+#: float32 kernel for the blocks int8 left unconverged -- the converged set can
+#: only grow); "only" = int8 alone, for measuring what it loses.  The kernel is
+#: scale-free except through its clamps, so the batch's LLRs are scaled so
+#: their mean magnitude sits at Q8_MEAN units (messages clamp at 31, posteriors
+#: at 96).
+Q8_DEFAULT = os.environ.get("ATSC3_LDPC_Q8", "0")
+Q8_LANES = 16
+Q8_MEAN = float(os.environ.get("ATSC3_LDPC_Q8_MEAN", "8"))
+#: sweeps int8 may spend before a block goes to the float32 kernel (a near miss
+#: that int8 cannot finish is the float32 kernel's job; bounding int8 bounds the waste)
+Q8_ITERS = int(os.environ.get("ATSC3_LDPC_Q8_ITERS", "16"))
+#: E131: the sixteen-lane int16 kernel WITH the two-minimum correction, half
+#: the float32 footprint.  "0" off; "1" alone; "hybrid" = int16 first, float32
+#: on what it left.  The batch's mean |LLR| is placed at Q16_MEAN units.
+Q16_DEFAULT = os.environ.get("ATSC3_LDPC_Q16", "1")
+Q16_LANES = 16
+Q16_MEAN = float(os.environ.get("ATSC3_LDPC_Q16_MEAN", "1024"))
 
 
 def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=None, abort=None, pack=None):
@@ -820,6 +858,90 @@ def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=N
     ak, at, ast = ABORT_DEFAULT if abort is None else tuple(float(x) for x in abort)
     ak, ast = int(ak), int(ast)
     at = int(round(at * nc)) if 0 < at < 1 else int(at)   # T < 1: a fraction of the checks
+
+    q16 = Q16_DEFAULT if getattr(lib, "has_q16", False) else "0"
+    if q16 != "0":
+        mean = float(np.mean(np.abs(llr))) if llr.size else 1.0
+        scale16 = np.float32(Q16_MEAN / mean) if mean > 0 else np.float32(1.0)
+
+        def one_q16(lo):
+            hi = min(lo + Q16_LANES, nblk)
+            work = np.empty((n + nedges) * Q16_LANES, np.int16)
+            return lib.ldpc_layered_q16(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                        int(iters), np.float32(alpha), scale16, int(corr), ak, at, ast,
+                                        bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
+        los = list(range(0, nblk, Q16_LANES))
+        rcs = list(ex.map(one_q16, los)) if ex is not None else [one_q16(lo) for lo in los]
+        if any(rc != 0 for rc in rcs):
+            return None
+        left = np.flatnonzero(conv == 0)
+        if q16 != "hybrid" or len(left) == 0:
+            return bits, conv.view(bool), its, bad
+        sub = np.ascontiguousarray(llr[left])
+        b2 = np.empty((len(left), n), np.uint8)
+        c2 = np.zeros(len(left), np.uint8)
+        i2 = np.full(len(left), iters, np.int32)
+        d2 = np.full(len(left), -1, np.int32)
+
+        def one_f32b(lo):
+            hi = min(lo + LAYERED_LANES, len(left))
+            work = np.empty((n + nedges) * LAYERED_LANES, np.float32)
+            return lib.ldpc_layered_f32(sub[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                        int(iters), np.float32(alpha), int(corr), ak, at, ast,
+                                        b2[lo:hi], c2[lo:hi], i2[lo:hi], d2[lo:hi], work)
+        los2 = list(range(0, len(left), LAYERED_LANES))
+        rcs = list(ex.map(one_f32b, los2)) if ex is not None else [one_f32b(lo) for lo in los2]
+        if any(rc != 0 for rc in rcs):
+            return None
+        bits[left] = b2
+        conv[left] = c2
+        its[left] = i2
+        bad[left] = d2
+        return bits, conv.view(bool), its, bad
+
+    q8 = Q8_DEFAULT if getattr(lib, "has_q8", False) else "0"
+    if q8 != "0":
+        # E130: sixteen int8 lanes per call, the mean |LLR| of the batch at Q8_MEAN units
+        mean = float(np.mean(np.abs(llr))) if llr.size else 1.0
+        scale = np.float32(Q8_MEAN / mean) if mean > 0 else np.float32(1.0)
+
+        def one_q8(lo):
+            hi = min(lo + Q8_LANES, nblk)
+            work = np.empty((n + nedges) * Q8_LANES, np.int8)
+            return lib.ldpc_layered_q8(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                       int(min(iters, Q8_ITERS)), np.float32(alpha), scale, ak, at, ast,
+                                       bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
+        los = list(range(0, nblk, Q8_LANES))
+        rcs = list(ex.map(one_q8, los)) if ex is not None else [one_q8(lo) for lo in los]
+        if any(rc != 0 for rc in rcs):
+            return None
+        if q8 == "only":
+            return bits, conv.view(bool), its, bad
+        left = np.flatnonzero(conv == 0)
+        if len(left) == 0:
+            return bits, conv.view(bool), its, bad
+        # the hybrid: the float32 kernel (box-plus and all) on what int8 left
+        sub = np.ascontiguousarray(llr[left])
+        b2 = np.empty((len(left), n), np.uint8)
+        c2 = np.zeros(len(left), np.uint8)
+        i2 = np.full(len(left), iters, np.int32)
+        d2 = np.full(len(left), -1, np.int32)
+
+        def one_f32(lo):
+            hi = min(lo + LAYERED_LANES, len(left))
+            work = np.empty((n + nedges) * LAYERED_LANES, np.float32)
+            return lib.ldpc_layered_f32(sub[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                        int(iters), np.float32(alpha), int(corr), ak, at, ast,
+                                        b2[lo:hi], c2[lo:hi], i2[lo:hi], d2[lo:hi], work)
+        los2 = list(range(0, len(left), LAYERED_LANES))
+        rcs = list(ex.map(one_f32, los2)) if ex is not None else [one_f32(lo) for lo in los2]
+        if any(rc != 0 for rc in rcs):
+            return None
+        bits[left] = b2
+        conv[left] = c2
+        its[left] = i2
+        bad[left] = d2
+        return bits, conv.view(bool), its, bad
 
     pack = (PACK_DEFAULT and getattr(lib, "has_pack", False)) if pack is None else bool(pack)
     if pack:
