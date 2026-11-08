@@ -854,7 +854,8 @@ class RouteStream:
                             tick_hz=90000,
                             pid=self.PID_BASE + tsi, handler=rep["handler"],
                             init=self.init[tsi], transport="route",
-                            lane_kind=rep["kind"], samples=None, kept=None))
+                            lane_kind=rep["kind"], lang=rep.get("lang"),
+                            samples=None, kept=None))
             self.stats["segment"] += 1
             nt = toi + 1
         self.next_toi[tsi] = nt
@@ -900,6 +901,9 @@ class Transport:
                  repair=True, route=None):
         self.repair = repair
         self.walker = StreamAlpWalker()
+        # M17: Baseband arrives per PLP and ALP packets never cross PLPs, so
+        # each PLP walks its own stream; the IP layer above is shared.
+        self.walkers = {0: self.walker}
         self.ip = R7.IpReasm()
         self.probe = probe
         self.want = (want,) if isinstance(want, bytes) else tuple(want)
@@ -939,9 +943,12 @@ class Transport:
                 return pid
         return next(iter(self.assets), None)
 
-    def feed(self, chunk, bounds):
+    def feed(self, chunk, bounds, plp=0):
         segs = []
-        for t, p in self.walker.feed(chunk, bounds):
+        w = self.walkers.get(plp)
+        if w is None:
+            w = self.walkers[plp] = StreamAlpWalker()
+        for t, p in w.feed(chunk, bounds):
             if t != 0:
                 self.stats[f"ptype{t}"] += 1
                 continue
@@ -1202,15 +1209,16 @@ class Transport:
 
     def flush(self):
         segs = []
-        for t, p in self.walker.pump(final=True):
-            if t != 0:
-                continue
-            for src, dst, sp, dp, pay in self.ip.feed(p):
-                self.stats["datagram"] += 1
-                if self.dg_fh is not None:
-                    self.dg_fh.write(R7.REC.pack(src, dst, sp, dp, len(pay))
-                                     + pay)
-                segs += self._route((dst, dp), pay)
+        for w in self.walkers.values():
+            for t, p in w.pump(final=True):
+                if t != 0:
+                    continue
+                for src, dst, sp, dp, pay in self.ip.feed(p):
+                    self.stats["datagram"] += 1
+                    if self.dg_fh is not None:
+                        self.dg_fh.write(R7.REC.pack(src, dst, sp, dp, len(pay))
+                                         + pay)
+                    segs += self._route((dst, dp), pay)
         return segs
 
 
@@ -2054,6 +2062,14 @@ class FileSource:
     def start(self):
         self.t0 = time.time()
 
+    def rebase(self):
+        """Re-anchor the real-time pacing to NOW for the samples already
+        read: the reader calls it when it takes over after a sniff, so the
+        decode pool's warm-up (which runs between the sniff and the reader)
+        does not arrive as a burst of back-dated air that the queues shed.
+        Pacing only -- the sample stream is unchanged."""
+        self.t0 = time.time() - self.n / self.rate
+
     def read(self):
         x = MP.read_block(self.path, self.pos, self.block, self.fmt)
         if not len(x):
@@ -2236,7 +2252,20 @@ class SdrSource:
                 self.sdr.getBandwidth(SOAPY_SDR_RX, 0))
         except Exception:                                      # noqa: BLE001
             pass
-        self.st = self.sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
+        # E109 (2026-11-07): the stream is NOT started here.  open() runs in
+        # build(), before the decode pool warms; the radio's ring buffer
+        # (1.3 s) overflowed during that warm-up on every live start, and an
+        # overflow costs a bootstrap re-acquisition.  start() streams, pause()
+        # stops: the sniff starts and pauses, the reader starts again when it
+        # is ready to consume (with one deliberate continuity break).
+        self.st = None
+        self._hb = time.time()
+        return self.readback
+
+    def start(self):
+        from SoapySDR import SOAPY_SDR_RX, SOAPY_SDR_CS16
+        if self.st is None:
+            self.st = self.sdr.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CS16)
         self.sdr.activateStream(self.st)
         # a sacrificial first read is the 8/01 meteor lesson; half a second
         # rather than a quarter because a startup overflow costs a bootstrap
@@ -2244,11 +2273,18 @@ class SdrSource:
         t = time.time()
         while time.time() - t < 0.5:
             self.sdr.readStream(self.st, [self._buf], 65536, timeoutUs=500000)
+        self._acc, self._acc_n = [], 0
         self._hb = time.time()
-        return self.readback
 
-    def start(self):
-        pass
+    def pause(self):
+        """Stop streaming (the buffer cannot overflow while nobody reads);
+        start() resumes.  The samples in between are gone: the caller marks a
+        continuity break."""
+        if self.st is not None:
+            try:
+                self.sdr.deactivateStream(self.st)
+            except Exception:                                  # noqa: BLE001
+                pass
 
     def read(self):
         """One block of `self.block` complex64 samples, or None on a break.
@@ -2288,8 +2324,9 @@ class SdrSource:
     def close(self):
         try:
             if self.st is not None:
-                self.sdr.deactivateStream(self.st)
-                self.sdr.closeStream(self.st)
+                if self.st is not None:
+                    self.sdr.deactivateStream(self.st)
+                    self.sdr.closeStream(self.st)
         except Exception:                                      # noqa: BLE001
             pass
         if self.held and self.rl is not None:

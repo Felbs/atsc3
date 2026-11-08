@@ -78,7 +78,8 @@ class MarginCfg:
 
     def __init__(self, ce_w=None, ce_detect=None, wllr=None, snr_gate_db=None,
                  sp=None, sp_ms=None, sp_cut=None, sp_iters=None,
-                 sp_blocks=None, ce_norm=None, ce_derot=None):
+                 sp_blocks=None, ce_norm=None, ce_derot=None,
+                 ce_comb=None):
         e = os.environ.get
 
         def num(v, key, dflt, cast):
@@ -103,6 +104,12 @@ class MarginCfg:
         # pre-fix behaviour -- kept ONLY as gate_e60 leg 8's negative control
         # (a residual-CFO phase ramp collapses the un-rotated mean: 0/74).
         self.ce_derot = bool(int(num(ce_derot, "ATSC3_CE_DEROT", 1, int)))
+        # E104 (2026-11-06): the smoothed grid's response formed in the delay
+        # domain (lever 4, below) instead of linear interpolation between grid
+        # points.  OFF by default until the live gate passes; the idea was
+        # learned from OnAir and re-implemented here (NOTICE, PRIOR_ART §13).
+        self.ce_comb = (bool(int(num(ce_comb, "ATSC3_CE_COMB", 0, int)))
+                        if master else False)
         # absolute detector: residual vs the symbol's own noise floor.
         # MEASURED (gate capture, complex-norm): clean frames sit at 1-4;
         # a whole-frame-poisoning shape change sits orders of magnitude up.
@@ -124,7 +131,7 @@ class MarginCfg:
     def asdict(self):
         return dict(ce_w=self.ce_w, ce_detect=self.ce_detect,
                     ce_norm=self.ce_norm, ce_derot=self.ce_derot,
-                    ce_abs=self.ce_abs, wllr=self.wllr,
+                    ce_abs=self.ce_abs, ce_comb=self.ce_comb, wllr=self.wllr,
                     snr_gate_db=self.snr_gate_db, sp=self.sp,
                     sp_ms=self.sp_ms, sp_cut=self.sp_cut,
                     sp_iters=self.sp_iters, sp_blocks=self.sp_blocks)
@@ -424,3 +431,127 @@ def ladder_decode(lam2d, checks, n, iters, alphas=(1.0, 0.85, 0.75),
         bad[bsel] = d[better]
         rows = rows[~c]
     return bits, conv, bad, alpha_used
+
+
+# ---------------------------------------------------------------------------
+# lever 4 -- E104: the channel estimate formed in the delay domain
+# ---------------------------------------------------------------------------
+# The pilots are a regular comb (spacing D carriers).  The inverse FFT of the
+# comb is the channel's impulse response, repeated every N/D samples.  A real
+# channel has a few taps (direct path, echoes) inside the guard interval; the
+# rest of the delay bins hold only pilot noise.  Keep one period, zero the
+# bins that are indistinguishable from noise, transform back: the response
+# at EVERY carrier then comes from the strong taps alone.  Linear
+# interpolation between pilots, by contrast, gives every cell the noise of two
+# pilots on top of its own.
+#
+# The method is standard DFT-based OFDM channel estimation; we first saw it
+# applied to ATSC 3.0 in OnAir (adswill/OnAir, GPL-3.0, atsc3_ofdm.cpp).  This
+# is written from the principle, not from their code (NOTICE: "Techniques
+# learned from other projects").  Two deliberate differences: the transform
+# length is a multiple of D so the periodic images are exact copies, and the
+# comb is checked against the guard interval before the method is trusted.
+# lab/e104_combce.py holds the per-symbol reference, the self-check and the
+# real-air gate (+1.5 dB on hit_rf33 PLP 1, per-symbol path).
+
+LN_4_3 = float(np.log(4.0 / 3.0))     # lower quartile of an exponential = mean * ln(4/3)
+
+
+def comb_denoise_grid(Hg, dx, nfft, min_period=0, floor_margin=4.0,
+                      dyn_range_db=60.0, energy_min=0.3, dilate=8,
+                      tau0=None, return_tau0=False):
+    """Delay-domain estimate of every column of a FULL pilot grid.
+
+    Hg: (ngrid, nsym) complex, the smoothed grid at carriers j*dx with no
+    holes (the caller passes only symbols the smoother covered).  Returns
+    (Hfull, used): Hfull is (nsym, noc) -- the response at every carrier for
+    the accepted symbols (rows of unaccepted symbols are left zero), and
+    used[l] says which were accepted.  A symbol is refused when the comb is
+    too sparse for `min_period` (the guard interval), when no tap clears the
+    noise floor, when most bins do (no structure), or when the kept taps
+    hold under `energy_min` of the window's power (noise alone clears the
+    floor in about e^-4 of its bins, holding under a tenth of the power).
+    """
+    ngrid, nsym = Hg.shape
+    noc = (ngrid - 1) * dx + 1
+    N = dx * int(np.ceil(nfft / dx))              # one period of N/dx exactly
+    W = N // dx
+    used = np.zeros(nsym, bool)
+    Hfull = np.zeros((nsym, noc), np.complex128)
+    if nsym == 0 or (min_period and W < min_period) or ngrid < 16:
+        return (Hfull, used, None) if return_tau0 else (Hfull, used)
+    comb_k = np.arange(ngrid) * dx
+    gap_k = np.arange(comb_k[-1] + dx, N, dx)
+    M = ngrid + len(gap_k)
+    pre = W // 4                                  # a quarter period early
+    idx = np.arange(-pre, W - pre) % N
+    delays = np.arange(-pre, W - pre)
+
+    def transform(G):
+        # The pilots cover only the used band.  The unused band is bridged
+        # with a straight line between the two edges (wrapping) so the comb
+        # is a full period: a flat channel then becomes one clean impulse.
+        B = np.zeros((G.shape[1], N), np.complex128)
+        B[:, comb_k] = G.T
+        if len(gap_k):
+            f = (gap_k - comb_k[-1]) / float(comb_k[0] + N - comb_k[-1])
+            B[:, gap_k] = (G[-1, :][:, None] * (1.0 - f)[None, :]
+                           + G[0, :][:, None] * f[None, :])
+        return np.fft.ifft(B, axis=1)[:, idx]
+
+    # A straight bridge is only honest when the channel's main path sits at
+    # zero delay: a delayed main path turns the response round the band, the
+    # two edges no longer match, and the bridge's kink leaks into every delay
+    # bin -- a bias floor near -25 dB that is worse than linear interpolation
+    # on a mild channel.  So: find the main path in a first pass, rotate the
+    # grid so it sits at zero delay, bridge, denoise, and rotate back.
+    # `tau0` (a hint from the caller: last Frame's main-path delays, one per
+    # column or one for all) skips the first transform; a hint that has gone
+    # stale -- the strongest tap no longer near zero after the rotation -- is
+    # discarded and measured afresh.
+    if tau0 is None:
+        tau0 = delays[np.argmax(np.abs(transform(Hg)) ** 2, axis=1)]
+    else:
+        tau0 = np.broadcast_to(np.asarray(tau0, int), (nsym,)).copy()
+    # one rotation vector per DISTINCT delay: the symbols of a Frame share the
+    # main path, so this is one or two exponentials of the grid, not nsym of
+    # them (MEASURED: the per-symbol form cost ~100 ms a Frame on 16K)
+    rots = {int(t): np.exp(2j * np.pi * t * comb_k / N) for t in np.unique(tau0)}
+    twist = np.stack([rots[int(t)] for t in tau0], axis=0)        # (nsym, ngrid)
+    Tw = transform((Hg.T * twist).T)
+    pw = np.abs(Tw) ** 2
+    if np.any(np.abs(delays[np.argmax(pw, axis=1)]) > W // 8):
+        # the hint was wrong: measure the delays and do it properly
+        return comb_denoise_grid(Hg, dx, nfft, min_period, floor_margin, dyn_range_db,
+                                 energy_min, dilate, tau0=None, return_tau0=return_tau0)
+    pmax = pw.max(axis=1)
+    floor = np.quantile(pw, 0.25, axis=1) / LN_4_3
+    thr = np.maximum(floor_margin * floor, pmax * 10.0 ** (-dyn_range_db / 10.0))
+    keep = pw >= thr[:, None]
+    # the refusals judge the taps that cleared the floor on their own
+    nk = keep.sum(axis=1)
+    tot = np.maximum(pw.sum(axis=1), 1e-300)
+    efrac = (pw * keep).sum(axis=1) / tot
+    ok = (pmax > 0) & (nk > 0) & (nk <= 3 * W // 4) & (efrac >= energy_min)
+    if dilate > 0:
+        # a kept tap's sidelobe skirts (the band-edge leakage sits there) go
+        # with it: a few bins either side, which hold almost no noise.
+        # MEASURED (synthetic grid, spacing 4): the 40 dB cap alone left a
+        # bias floor near -31 dB, worse than linear interpolation on a mild
+        # channel at a 40 dB grid; 60 dB and 8 skirt bins make it better or
+        # equal at every SNR tried, by 3-7 dB (mild) to 17-23 dB (strong echo).
+        kd = keep.copy()
+        for sh in range(1, dilate + 1):
+            kd[:, sh:] |= keep[:, :-sh]
+            kd[:, :-sh] |= keep[:, sh:]
+        keep = kd
+    if not ok.any():
+        return (Hfull, used, tau0) if return_tau0 else (Hfull, used)
+    C = np.zeros((int(ok.sum()), N), np.complex128)
+    C[:, idx] = np.where(keep[ok], Tw[ok], 0.0)
+    kk = np.arange(noc)
+    unrots = {int(t): np.exp(-2j * np.pi * t * kk / N) for t in np.unique(tau0[ok])}
+    untwist = np.stack([unrots[int(t)] for t in tau0[ok]], axis=0)
+    Hfull[ok] = np.fft.fft(C, axis=1)[:, :noc] * (N / float(M)) * untwist
+    used[ok] = True
+    return (Hfull, used, tau0) if return_tau0 else (Hfull, used)

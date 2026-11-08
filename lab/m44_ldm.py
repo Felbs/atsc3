@@ -93,6 +93,7 @@ import sys
 import threading
 import time
 
+import os
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -128,6 +129,43 @@ BOOTSTRAP = 13824
 # min-sum close them by itself.  Re-test before assuming this holds at other
 # operating points -- a recorded negative is a reference, not an authority.
 SP_RESCUE = os.environ.get("ATSC3_LDM_SP", "0") not in ("0", "off", "no")
+#: E120: Blocks a provisional phase is judged on (0 = every Block available).
+PROBE_BLOCKS = int(os.environ.get("ATSC3_LDM_PROBE_BLOCKS", "0"))
+#: E125: the alpha ladder's near-miss gate.  A Block that fails a rung climbs
+#: to the next one only if that rung left it CLOSE -- final syndrome weight
+#: under LADDER_NEAR x (parity checks).  Sized on the per-call LDPC record
+#: (13.22): under the E121 ladder the later rungs cost 42% of all sweeps at
+#: 12 dB and converged 3 Blocks of 1,389, every one of them left at a
+#: syndrome of 2 by rung 1; the Blocks rung 1 left at 259-9,451 (p5-p95)
+#: never converged later.  The hopeless two-level abort 13.21 proposed is a
+#: subset of this (its aborts are never rescued either) and saves 2.7%.
+#: ON at 0.02 x nc from its gates (13.22): gate_e121 zero loss and bits
+#: identical on three banked records (22-35% fewer vector-sweeps), gate_e107
+#: PASS, and the 12 dB replay at 8 x 2 0.679 -> 0.950x with the converged
+#: count (1,389) and the lanes byte-identical; as-recorded 1.143 -> 1.322x.
+#: ATSC3_LDPC_LADDER_NEAR=0 restores E121 as shipped.
+LADDER_NEAR = float(os.environ.get("ATSC3_LDPC_LADDER_NEAR", "0.02"))
+#: E124: bank every ATSC3_FEC_CELL_DUMP_EVERY-th FEC batch (the de-interleaved
+#: Core cells, complex64, with the decoded Baseband Packets) under this
+#: directory, from the parent and from every pool worker.  Off unless set.
+#: `lab/e124_ldm_snr.py` turns a bank into E69's numbers.
+_CELL_DUMP = os.environ.get("ATSC3_FEC_CELL_DUMP")
+_CELL_DUMP_EVERY = max(1, int(os.environ.get("ATSC3_FEC_CELL_DUMP_EVERY", "10")))
+_CELL_DUMP_N = [0]
+#: E123: when a locked phase is LOST, the blind sweep is anchored at
+#: (the Frame of the batch that tripped the loss window) + LOSS_LAG + 1 --
+#: a function of the stream, not of how many Frames the pool had in flight
+#: when the verdict landed (13.20: at P=4/6/8/12/16/24 the old anchor
+#: `cti.next_frame` gave six different re-locks, and two P=4 runs differed
+#: when a file write shifted the timing).  The parent keeps the invariant
+#: that makes the anchor reachable: it does not cut Frame F's Blocks before
+#: every FEC batch from Frames <= F - LOSS_LAG - 1 has its verdict, so at the
+#: verdict `cti.next_frame` <= anchor always.  LOSS_LAG must exceed the FEC
+#: pool's latency in Frames or the parent stalls on it (measured 24 x 2 on
+#: the 32-core box: ~10 Frames); the price is up to LOSS_LAG Frames more
+#: blackout after a loss that was already 24 batches deep.  0 restores the
+#: old anchor.
+LOSS_LAG = int(os.environ.get("ATSC3_LDM_LOSS_LAG", "12"))
 SP_NEAR_MAX = int(os.environ.get("ATSC3_LDM_SP_NEAR", "1500"))
 SP_ITERS = int(os.environ.get("ATSC3_LDM_SP_ITERS", "100"))
 SP_MAX_BLOCKS = int(os.environ.get("ATSC3_LDM_SP_BLOCKS", "8"))
@@ -143,6 +181,15 @@ CE_W = int(os.environ.get("ATSC3_LDM_CE_W", "12"))          # 0 disables
 CE_DETECT = float(os.environ.get("ATSC3_LDM_CE_DETECT", "6.0"))
 CE_ABS = float(os.environ.get("ATSC3_LDM_CE_ABS", "10.0"))
 CE_NORM = os.environ.get("ATSC3_LDM_CE_NORM", "1") not in ("0", "off", "no")
+#: E127 (13.25): bank the raw scattered-pilot estimates of every Nth Frame
+#: (the (grid x symbol) matrix the smoother works from, its per-symbol gains,
+#: the smoothed grid, the per-symbol pilot noise floor and the fallback
+#: mask) so the channel -- delay spread against the pilot grid's reach, the
+#: pilot SNR against the data cells' -- can be measured offline.  A probe,
+#: like E124's cell dump: off unless the variable names a directory.
+_CE_DUMP = os.environ.get("ATSC3_LDM_CE_DUMP")
+_CE_DUMP_EVERY = max(1, int(os.environ.get("ATSC3_LDM_CE_DUMP_EVERY", "20")))
+_CE_DUMP_N = [0]
 
 
 # ===========================================================================
@@ -295,7 +342,8 @@ class LdmPlan:
             f"({self.frame_sec * 1000:.3f} ms)\n"
             f"    layers: "
             + ", ".join(f"PLP{p['id']}(L{p['layer']} {p['mod']} {p['rate']}"
-                        + (f" inj{p['ldm_injection']}"
+                        + (f" inj {S.ldm_injection_db(p['ldm_injection']):.1f} dB"
+                           f" (idx {p['ldm_injection']})"
                            if p["ldm_injection"] is not None else "") + ")"
                         for p in g.plps)
             + f"\n    CORE = PLP{self.core['id']}: {self.core['mod']} "
@@ -959,6 +1007,18 @@ class FrameDemod:
         for ci, tb in enumerate(cp["tabs"]):
             if not smt["cls_ok"][ci]:
                 smooth_ok[tb["rows"]] = False
+        if _CE_DUMP:
+            k = _CE_DUMP_N[0]; _CE_DUMP_N[0] += 1
+            if k % _CE_DUMP_EVERY == 0:
+                try:
+                    os.makedirs(_CE_DUMP, exist_ok=True)
+                    np.savez(os.path.join(_CE_DUMP, f"ce_{os.getpid()}_{k:05d}.npz"),
+                             Hg=Hg.astype(np.complex64), Mg=Mg, cl=cl.astype(np.complex64),
+                             Hsm=Hsm.astype(np.complex64), res_l=res_l, sig2_l=sig2_l,
+                             ok=smooth_ok, dx=int(smt["dx"]), dy=int(smt["dy"]),
+                             noc=int(smt["noc"]), nfft=int(g.nfft), nsym=int(nsym), ce_w=int(Wn))
+                except Exception:                                  # noqa: BLE001
+                    pass
         return dict(Hsm=Hsm, cl=cl, ok=smooth_ok, smt=smt,
                     n_fallback=int(nsym - smooth_ok.sum()))
 
@@ -1007,11 +1067,68 @@ class FrameDemod:
         ce = self._ce_smooth(Yb, cp)
         self.tm["ce_smooth"] += pc() - t_ce
 
+        # E111: the compiled equaliser.  Frame-constant typed views, hoisted.
+        kern = (_ldm_cellpool_kern()
+                if getattr(self, "use_cellpool_kernel", _LDM_CELLPOOL_KERNEL)
+                else None)
+        if kern is not None and ce is not None:
+            jgc = np.ascontiguousarray(ce["smt"]["jg"], np.int32)
+            wtc = np.ascontiguousarray(ce["smt"]["wtg"], np.float64)
+        else:
+            jgc = wtc = None
+
         def one_class(tb):
             sg = tb["g"]
             rows = tb["rows"]
             Yr = Yb[rows]
             hp = Yr[:, sg["bins_pk"]] / sg["refpk"]
+            # the coherence metric is the numpy path's, untouched: it needs
+            # only the pilot bins, which cost nothing to keep in numpy
+            num = np.abs(np.sum(hp[:, :-1] * np.conj(hp[:, 1:]), axis=1))
+            den = np.maximum(np.sum(np.abs(hp) ** 2, axis=1), 1e-30)
+            dcoh[rows] = num / den
+            a, b = tb["trim"]
+            if kern is not None:
+                # E111 (E106's law, on the LDM path): H is never built.  A
+                # smoothed symbol interpolates its channel off the grid inside
+                # the kernel, one cell at a time; an un-smoothed one uses its
+                # own pilots, which is what cellpool_row_f64 already does.
+                # The (nrows, ncar) complex128 H and its fancy-index gathers
+                # never happen.  Bit-exact: Smith's division mirrors numpy's
+                # nc_quot, the complex multiply is in numpy's association.
+                kc = _ldm_ktabs(tb)
+                nd = tb["nd"]
+                npk = len(kc["bins_pk"])
+                hpbuf = np.empty(2 * npk, np.float64)
+                xg1 = np.empty(nd, np.complex128)
+                sm = ce["ok"][rows] if ce is not None else None
+                ok = True
+                for i, l in enumerate(rows):
+                    row = np.ascontiguousarray(Yb[l], np.complex128)
+                    if sm is not None and sm[i]:
+                        Hgc = np.ascontiguousarray(ce["Hsm"][:, l], np.complex128)
+                        cli = complex(ce["cl"][l])
+                        rc = kern.cellpool_row_sm_f64(
+                            row.view(np.float64), row.shape[0],
+                            Hgc.view(np.float64), Hgc.shape[0],
+                            jgc, wtc, len(jgc), cli.real, cli.imag,
+                            kc["bins_d"], kc["dmap"], kc["hmat"][i], nd,
+                            xg1.view(np.float64))
+                    else:
+                        rc = kern.cellpool_row_f64(
+                            row.view(np.float64), row.shape[0],
+                            kc["bins_pk"], kc["refpk"].view(np.float64),
+                            npk, kc["jj"], kc["wt"], len(kc["jj"]),
+                            kc["bins_d"], kc["dmap"], kc["hmat"][i], nd,
+                            hpbuf, xg1.view(np.float64))
+                    if rc != 0:
+                        ok = False
+                        break
+                    pool[offs[l]:offs[l + 1]] = xg1[a:b]
+                    owner[offs[l]:offs[l + 1]] = l
+                if ok:
+                    return
+                # a refused index -- fall through to numpy, H and all
             if ce is None:
                 # untouched path -- byte-identical to pre-E86c by construction
                 H = (hp[:, tb["j"]] * (1.0 - tb["wt"])
@@ -1031,10 +1148,6 @@ class FrameDemod:
             z = Yr[:, sg["bins_d"]] / H[:, sg["d"]]
             xg = np.empty_like(z)
             xg[np.arange(len(z))[:, None], tb["Hmat"]] = z
-            num = np.abs(np.sum(hp[:, :-1] * np.conj(hp[:, 1:]), axis=1))
-            den = np.maximum(np.sum(np.abs(hp) ** 2, axis=1), 1e-30)
-            dcoh[rows] = num / den
-            a, b = tb["trim"]
             for i, l in enumerate(rows):
                 pool[offs[l]:offs[l + 1]] = xg[i, a:b]
                 owner[offs[l]:offs[l + 1]] = l
@@ -1047,7 +1160,10 @@ class FrameDemod:
         rep.update(pool=int(len(pool)), pool_predicted=pl.pool_pred,
                    preamble_coherence=[round(float(c), 4) for c in cohs],
                    data_coherence_mean=float(np.mean(dcoh)),
-                   n_preamble_spare=int(len(spare)))
+                   n_preamble_spare=int(len(spare)),
+                   # E86c, for E111: report whether the compiled equaliser
+                   # actually ran, so "kernel on" can never mean "fell back"
+                   cellpool_kernel=bool(kern is not None))
         # E86c: a lever that silently no-ops is worse than one that is off,
         # because the cost is still paid and the number still moves for some
         # other reason.  Report how many symbols actually took the smoothed
@@ -1105,8 +1221,30 @@ class FrameDemod:
         step = max(1, (ncore + nch - 1) // nch)
         chunks = [(i, min(ncore, i + step)) for i in range(0, ncore, step)]
 
+        # E111: the nearest-point search in C.  The point table is pre-scaled
+        # by -2 (exact: a power of two commutes with IEEE rounding), so the
+        # kernel's x*pfx + y*pfy + p2f rounds identically to _point_metric's
+        # -2*(zr*pr + zi*pi) + p2, term for term; first-minimum tie rule, as
+        # argmin.  Pure C under ctypes: no BLAS, no GIL.
+        kern = (_ldm_cpe_kern()
+                if getattr(self, "use_cpe_kernel", _LDM_CPE_KERNEL) else None)
+        if kern is not None:
+            kx = np.ascontiguousarray(pr * np.float32(-2.0), np.float32)
+            ky = np.ascontiguousarray(pi * np.float32(-2.0), np.float32)
+            kp = np.ascontiguousarray(p2f, np.float32)
+            npts = len(pts)
+
         def decide(lo, hi):
             z = zs[lo:hi]
+            if kern is not None:
+                zr = np.ascontiguousarray(z.real, np.float32)
+                zi = np.ascontiguousarray(z.imag, np.float32)
+                idx = np.empty(hi - lo, np.int32)
+                rc = kern.cpe_nearest_f32(zr, zi, hi - lo, kx, ky, kp, npts, idx)
+                if rc == 0:
+                    hard[lo:hi] = pts[idx]
+                    return
+                # a shape the kernel refuses -- fall through to numpy
             sc = _point_metric(np.asarray(z.real, np.float32),
                                np.asarray(z.imag, np.float32), pr, pi, p2f)
             hard[lo:hi] = pts[sc.argmin(1)]
@@ -1304,6 +1442,11 @@ class CtiStream:
         self.end += n
 
     # -- output ------------------------------------------------------------
+    def frame_of_block(self, block_id):
+        """The Frame (absolute index) holding the FIRST cell of Block `block_id`
+        in the de-interleaved index space: a function of the stream alone."""
+        return self.origin_frame + (self.C0 + int(block_id) * self.ncell) // self.plan.plp_size
+
     def available_blocks(self):
         """How many complete FEC Blocks the buffered cells can produce."""
         if self.origin_frame is None:
@@ -1524,6 +1667,11 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
         blk = np.ndarray((nslots, blk_len), np.complex64, buffer=shm_b.buf)
         plan = M44.LdmPlan.from_spec(spec)
         nth = int(cfg["threads"])
+        # E126: a worker's ROLE.  "both" is the single-kind pool (every worker
+        # takes demod and FEC jobs off one queue); "demod" and "fec" workers
+        # each take one kind off their own queue, so a Frame's demod never
+        # shares a process -- or a queue -- with an LDPC batch (13.22 Part 3).
+        role = cfg.get("role", "both")
         ex = ThreadPoolExecutor(max_workers=nth) if nth > 1 else None
         fd = M44.FrameDemod(plan, threads=nth, ex=ex)
         fd.prewarm()
@@ -1531,13 +1679,15 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
         # no phase, no Frame counter.  It is handed complete FEC Blocks and
         # returns Baseband Packets, which is a pure function -- so which
         # worker ran a Block cannot be visible in the output.
-        fec = M44.LdmPipeline(plan=plan, iters=cfg["iters"], threads=nth,
-                              ex=ex, accel="cpu", log=lambda *_a: None,
-                              fec_threads=nth)
-        fec.fd = fd
+        fec = None
+        if role != "demod":
+            fec = M44.LdmPipeline(plan=plan, iters=cfg["iters"], threads=nth,
+                                  ex=ex, accel="cpu", log=lambda *_a: None,
+                                  fec_threads=nth)
+            fec.fd = fd
         ncell = plan.ncell
         out_q.put(("ready", (os.getpid(),
-                             os.environ.get("OMP_NUM_THREADS"))))
+                             os.environ.get("OMP_NUM_THREADS"), role)))
         while True:
             msg = in_q.get()
             if msg is None:
@@ -1545,7 +1695,8 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
             kind = msg[0]
             t = time.perf_counter()
             if kind == "demod":
-                _k, wslot, cslot, idx, n, t0 = msg
+                _k, wslot, cslot, idx, n, t0, t_sub = msg
+                qwait = t - t_sub           # E117: sat in in_q this long
                 rep = {}
                 ok = True
                 try:
@@ -1558,9 +1709,11 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
                                      dict(coh=rep.get("data_coherence_mean"),
                                           dummy=rep.get("dummy_agreement"),
                                           err=rep.get("err")),
-                                     time.perf_counter() - t)))
+                                     time.perf_counter() - t,
+                                     qwait, time.perf_counter())))
             elif kind == "fec":
-                _k, bslot, first_id, nb = msg
+                _k, bslot, first_id, nb, t_sub = msg
+                qwait = t - t_sub
                 segs = [blk[bslot, m * ncell:(m + 1) * ncell]
                         for m in range(nb)]
                 try:
@@ -1570,9 +1723,11 @@ def _demod_worker(shm_win, shm_cell, shm_blk, nslots, win_len, cell_len,
                     pk, nconv, nbch = [None] * nb, 0, 0
                     err = f"{type(e).__name__}: {e}"
                 out_q.put(("fec", (first_id, bslot, nb, pk, nconv, nbch, err,
-                                   time.perf_counter() - t)))
+                                   time.perf_counter() - t,
+                                   qwait, time.perf_counter())))
         tm = dict(fd.tm)
-        tm.update({("w_" + k): v for k, v in fec.tm.items()})
+        if fec is not None:
+            tm.update({("w_" + k): v for k, v in fec.tm.items()})
         out_q.put(("done", tm))
         if ex is not None:
             ex.shutdown(wait=False)
@@ -1611,17 +1766,20 @@ class LdmDemodPool:
     #: what the LDPC's own batching wants anyway; larger batches are split.
     MAX_BLK = 48
 
-    def __init__(self, plan, nproc=4, threads=4, blas=1, iters=50, log=print):
+    def __init__(self, plan, nproc=4, threads=4, blas=1, iters=50, log=print,
+                 nfec=0, fec_threads=None):
         self.plan = plan
         self.nproc = int(nproc)
         self.threads = int(threads)
+        self.nfec = int(nfec)                       # E126: FEC-only processes
+        self.fec_threads = int(fec_threads or threads)
         self.blas = int(blas)
         self.iters = int(iters)
         self.log = log
         self.win_len = plan.frame_window + 4096
         self.cell_len = plan.plp_size
         self.blk_len = self.MAX_BLK * plan.ncell
-        self.nslots = self.nproc + 2
+        self.nslots = self.nproc + self.nfec + 2
         self.procs = []
         self.free_w = list(range(self.nslots))
         self.free_c = list(range(self.nslots))
@@ -1671,21 +1829,30 @@ class LdmDemodPool:
         ctx = mp.get_context("spawn")
         self.in_q = ctx.Queue()
         self.out_q = ctx.Queue()
-        cfg = dict(threads=self.threads, iters=self.iters)
+        # E126: with FEC workers, FEC jobs get a queue of their own; without
+        # them the FEC queue IS the demod queue and every worker takes both
+        # kinds -- the single-kind pool, byte for byte.
+        self.fec_q = ctx.Queue() if self.nfec > 0 else self.in_q
+        role_d = "demod" if self.nfec > 0 else "both"
         spec = self.plan.to_spec()
-        self.procs = [ctx.Process(target=_demod_worker,
-                                  args=(self.shm_w.name, self.shm_c.name,
-                                        self.shm_b.name, self.nslots,
-                                        self.win_len, self.cell_len,
-                                        self.blk_len, self.in_q, self.out_q,
-                                        spec, cfg), daemon=True)
-                      for _ in range(self.nproc)]
+
+        def _proc(q, cfg):
+            return ctx.Process(target=_demod_worker,
+                               args=(self.shm_w.name, self.shm_c.name,
+                                     self.shm_b.name, self.nslots,
+                                     self.win_len, self.cell_len,
+                                     self.blk_len, q, self.out_q,
+                                     spec, cfg), daemon=True)
+        self.procs = ([_proc(self.in_q, dict(threads=self.threads, iters=self.iters, role=role_d))
+                       for _ in range(self.nproc)]
+                      + [_proc(self.fec_q, dict(threads=self.fec_threads, iters=self.iters, role="fec"))
+                         for _ in range(self.nfec)])
         t0 = time.time()
         for p in self.procs:
             p.start()
         ready = 0
         omp = None
-        while ready < self.nproc:
+        while ready < self.nproc + self.nfec:
             kind, payload = self.out_q.get(timeout=300)
             if kind == "err":
                 raise RuntimeError(f"demod worker failed to start: {payload}")
@@ -1693,8 +1860,10 @@ class LdmDemodPool:
                 ready += 1
                 omp = payload[1]
         self.started = True
-        self.log(f"  LDM demod pool: {self.nproc} processes x {self.threads} "
-                 f"threads, BLAS pinned to {omp}, {self.nslots} shared "
+        self.log(f"  LDM demod pool: {self.nproc} processes x {self.threads} threads"
+                 + (f" + {self.nfec} FEC processes x {self.fec_threads} threads (E126)"
+                    if self.nfec else "")
+                 + f", BLAS pinned to {omp}, {self.nslots} shared "
                  f"window slots ({self.nslots * self.win_len * 16 >> 20} MB) "
                  f"+ cell slots ({self.nslots * self.cell_len * 8 >> 20} MB), "
                  f"warmed in {time.time() - t0:.1f} s")
@@ -1702,11 +1871,13 @@ class LdmDemodPool:
     def stop(self):
         if not self.procs:
             return
-        for _ in self.procs:
-            try:
-                self.in_q.put(None)
-            except Exception:                                  # noqa: BLE001
-                break
+        for q, n in ((self.in_q, self.nproc),
+                     (getattr(self, "fec_q", self.in_q), self.nfec)):
+            for _ in range(n):
+                try:
+                    q.put(None)
+                except Exception:                              # noqa: BLE001
+                    break
         deadline = time.time() + 8
         got = 0
         while got < len(self.procs) and time.time() < deadline:
@@ -1745,8 +1916,11 @@ class LdmDemodPool:
         n = len(window)
         if n > self.win_len:
             raise ValueError(f"window {n} > slot {self.win_len}")
+        t = time.perf_counter()
         self.win[w, :n] = window
-        self.in_q.put(("demod", w, c, int(idx), int(n), int(t0)))
+        self.tm["submit_copy"] += time.perf_counter() - t
+        self.in_q.put(("demod", w, c, int(idx), int(n), int(t0),
+                       time.perf_counter()))
         self.order.append(int(idx))
         self.stats["submitted"] += 1
         return True
@@ -1762,15 +1936,21 @@ class LdmDemodPool:
         if kind == "done":
             self.tm.update(payload)
             return False
+        now = time.perf_counter()
         if kind == "cells":
-            idx, wslot, cslot, ok, diag, dt_ = payload
+            idx, wslot, cslot, ok, diag, dt_, qwait, t_done = payload
             self.free_w.append(wslot)
-            self.parked[idx] = (cslot, ok, diag, dt_)
+            self.parked[idx] = (cslot, ok, diag, dt_, now)
+            self.tm["worker_qwait"] += qwait
+            self.tm["out_q_latency"] += now - t_done
             self.stats["returned"] += 1
         elif kind == "fec":
-            first_id, bslot, nb, pk, nconv, nbch, err, dt_ = payload
+            (first_id, bslot, nb, pk, nconv, nbch, err, dt_,
+             qwait, t_done) = payload
             self.free_b.append(bslot)
-            self.fparked[first_id] = (nb, pk, nconv, nbch, err, dt_)
+            self.fparked[first_id] = (nb, pk, nconv, nbch, err, dt_, now)
+            self.tm["fec_worker_qwait"] += qwait
+            self.tm["fec_out_q_latency"] += now - t_done
             self.stats["fec_returned"] += 1
         return True
 
@@ -1793,9 +1973,11 @@ class LdmDemodPool:
             raise ValueError(f"batch {nb} > MAX_BLK {self.MAX_BLK}")
         b = self.free_b.pop()
         ncell = self.plan.ncell
+        t = time.perf_counter()
         for m, seg in enumerate(segs):
             self.blk[b, m * ncell:(m + 1) * ncell] = seg
-        self.in_q.put(("fec", b, int(first_id), int(nb)))
+        self.tm["fec_submit_copy"] += time.perf_counter() - t
+        self.fec_q.put(("fec", b, int(first_id), int(nb), time.perf_counter()))
         self.forder.append(int(first_id))
         self.stats["fec_submitted"] += 1
         return True
@@ -1820,8 +2002,9 @@ class LdmDemodPool:
                     pass
         while self.forder and self.forder[0] in self.fparked:
             fid = self.forder.popleft()
-            nb, pk, nconv, nbch, err, dt_ = self.fparked.pop(fid)
+            nb, pk, nconv, nbch, err, dt_, t_pump = self.fparked.pop(fid)
             self.tm["worker_fec"] += dt_
+            self.tm["fec_park_wait"] += time.perf_counter() - t_pump
             on_batch(fid, pk, nconv, nbch, err)
             n += 1
         return n
@@ -1862,8 +2045,9 @@ class LdmDemodPool:
                     pass
         while self.order and self.order[0] in self.parked:
             idx = self.order.popleft()
-            cslot, ok, diag, dt_ = self.parked.pop(idx)
+            cslot, ok, diag, dt_, t_pump = self.parked.pop(idx)
             self.tm["worker_demod"] += dt_
+            self.tm["park_wait"] += time.perf_counter() - t_pump
             try:
                 on_frame(idx, self.cel[cslot, :self.cell_len] if ok else None,
                          diag)
@@ -1899,7 +2083,7 @@ class LdmPipeline:
 
     def __init__(self, plan=None, iters=50, threads=4, ex=None, accel="cpu",
                  log=print, alpha=None, procs=0, proc_threads=4,
-                 fec_threads=None):
+                 fec_threads=None, fec_procs=0, fec_proc_threads=None):
         self.plan = plan
         self.iters = iters
         self.threads = threads
@@ -1913,13 +2097,19 @@ class LdmPipeline:
         self.procs = int(procs)
         self.proc_threads = int(proc_threads)
         self.fec_threads = int(fec_threads or threads)
+        self.fec_procs = int(fec_procs)                       # E126
+        self.fec_proc_threads = int(fec_proc_threads or proc_threads)
         self.pool = None
+        self.pool_report = None         # E117: the pool's timers after close()
         self.fd = None
         self.cti = None
+        self._wins = []                 # E115: windows the CTI has not consumed yet
         self.ph = None
         self.gpu = None
         self.origin = None
         self.l1_tries = 0
+        self.cold_floor = 0    # E123: no fresh L1 is read from a Frame below this
+        self.l1_scanned_upto = -1   # E123: every Frame gets at most ONE cold L1 read
         self.bb_abs = 0        # absolute byte offset into the Baseband stream
         self.n_frames = 0
         self.n_blocks = 0
@@ -1957,12 +2147,23 @@ class LdmPipeline:
         if self.procs > 0 and self.pool is None and self.plan is not None:
             self.pool = LdmDemodPool(self.plan, nproc=self.procs,
                                      threads=self.proc_threads,
-                                     iters=self.iters, log=self.log)
+                                     iters=self.iters, log=self.log,
+                                     nfec=self.fec_procs,
+                                     fec_threads=self.fec_proc_threads)
             self.pool.start()
 
     def close(self):
         if self.pool is not None:
             self.pool.stop()
+            # E117: stop() is where the workers hand back their stage timers,
+            # and m11_watch closes the pipeline BEFORE it asks for summary()
+            # -- so until now every worker-side number was collected and then
+            # dropped (`demod_ms_per_frame: {}` in every pooled run's JSON).
+            self.pool_report = dict(procs=self.pool.nproc,
+                                    threads=self.pool.threads,
+                                    blas=self.pool.blas,
+                                    stats=dict(self.pool.stats),
+                                    tm=dict(self.pool.tm))
             self.pool = None
 
     def _make_gpu(self):
@@ -2001,30 +2202,32 @@ class LdmPipeline:
         # thing a sweep can be centred on), so keying this branch off the
         # anchor would leave the pipeline with a dead CtiStream and no path
         # that ever re-decodes L1 -- a wedge, not a fallback.
+        # E115: keep this window (a copy -- the caller's buffer is not ours to
+        # hold) until the CTI has consumed its Frame, so a cold verdict can
+        # re-read L1 from the oldest unconsumed one instead of waiting for the
+        # next NEW Frame and discarding everything in flight (13.16).  At most
+        # the in-flight Frames are held: nslots of ~27 MB.
+        t = pc()
+        self._wins.append((int(frame_idx), np.array(y, copy=True), t0, ps))
+        self.tm["win_hold_copy"] += pc() - t
+        if self.cti is not None and self.cti.origin_frame is not None:
+            nxt = self.cti.next_frame
+            self._wins = [w for w in self._wins if w[0] >= nxt]
+        keep = (self.pool.nslots + 2) if self.pool is not None else 4
+        if len(self._wins) > keep:
+            del self._wins[:-keep]
         need_phase = (self.plan is None or self.ph is None or self.cti is None
                       or self.cti.origin_frame is None)
+        if need_phase and (frame_idx < self.cold_floor
+                           or frame_idx <= self.l1_scanned_upto):
+            # E123: a Frame from BEFORE the point the stream went cold, or one
+            # the cold scan already read.  A deep pool delivers it, a shallow
+            # one has already consumed it; reading its L1 would make the
+            # re-lock depend on which.  Skipped on every layout alike.
+            self.stats["pre_floor_skipped"] += 1
+            need_phase = False
         if need_phase:
-            t = pc()
-            L = l1_from_window(y, t0, ps=ps)
-            self.tm["l1"] += pc() - t
-            self.l1_tries += 1
-            if L is not None and L.get("ok"):
-                if self.plan is None:
-                    self.adopt(LdmPlan.from_l1_result(L, label="live"))
-                self.last_l1 = L
-                if self.ph.learn_from_l1(frame_idx, L):
-                    self.stats["l1_verified"] += 1
-                    self._begin(frame_idx)
-            elif (self.l1_tries >= self.L1_TRIES and self.plan is not None
-                  and self.ph.anchor is not None):
-                # L1 will not verify but the Frame count is still continuous,
-                # so the dead-reckoned start_row is still meaningful and only
-                # its Frame OFFSET is in doubt.  Sweep it.  (Since the 6.5.2.7
-                # fix L1 verifies on every Frame of both banked captures, so
-                # this path is REACHABLE BUT UNTESTED ON AIR -- said plainly.)
-                self.stats["l1_gave_up"] += 1
-                self.l1_tries = 0
-                self._begin(frame_idx, blind=True)
+            self._try_l1(frame_idx, y, t0, ps)
         elif self.L1_CHECK_EVERY and frame_idx % self.L1_CHECK_EVERY == 0:
             # FREE CONTINUITY GATE (m10_core P4, live): whenever L1 verifies
             # again, its signalled start_row must equal the dead-reckoned one.
@@ -2076,6 +2279,60 @@ class LdmPipeline:
         return self.drain()
 
     # -- E85: the same Frame, demodulated in a worker process --------------
+    # -- E115: re-acquire the moment the CTI goes cold ------------------------
+    def _try_l1(self, frame_idx, y, t0, ps):
+        """ONE cold L1 read of Frame `frame_idx`, the same whether the Frame is
+        arriving now or is already held (E123): verify -> anchor and begin;
+        or, after L1_TRIES failures with an anchor still standing, sweep
+        blind from here."""
+        pc = time.perf_counter
+        self.l1_scanned_upto = max(self.l1_scanned_upto, int(frame_idx))
+        t = pc()
+        L = l1_from_window(y, t0, ps=ps)
+        self.tm["l1"] += pc() - t
+        self.l1_tries += 1
+        if L is not None and L.get("ok"):
+            if self.plan is None:
+                self.adopt(LdmPlan.from_l1_result(L, label="live"))
+            self.last_l1 = L
+            if self.ph.learn_from_l1(frame_idx, L):
+                self.stats["l1_verified"] += 1
+                self._begin(frame_idx)
+        elif (self.l1_tries >= self.L1_TRIES and self.plan is not None
+              and self.ph.anchor is not None):
+            # L1 will not verify but the Frame count is still continuous,
+            # so the dead-reckoned start_row is still meaningful and only
+            # its Frame OFFSET is in doubt.  Sweep it.  (Since the 6.5.2.7
+            # fix L1 verifies on every Frame of both banked captures, so
+            # this path is REACHABLE BUT UNTESTED ON AIR -- said plainly.)
+            self.stats["l1_gave_up"] += 1
+            self.l1_tries = 0
+            self._begin(frame_idx, blind=True)
+
+    def _reacquire_now(self, since):
+        """The CTI just went cold at a FEC verdict.  Re-read L1 from the oldest
+        window the CTI has not consumed (`since` = the Frame it was waiting
+        for) and anchor there, so the Frames already in flight are kept and
+        no new Frame has to arrive first.  Falls through to the old path --
+        push_frame's need_phase on the next Frame -- if no held window yields a
+        candidate.  Never called from inside _begin, so it cannot recurse."""
+        # E123: the held windows are the Frames that already passed
+        # push_frame (a deep pool holds more of them than a shallow one); the
+        # Frames still to come pass push_frame later.  Both go through
+        # _try_l1 exactly once, in Frame order, from the floor up -- so the
+        # re-lock is the same sequence of reads on every layout.
+        self.cold_floor = max(self.cold_floor, int(since))
+        for idx, y, t0, ps in list(self._wins):
+            if idx < self.cold_floor or idx <= self.l1_scanned_upto:
+                continue
+            self._try_l1(idx, y, t0, ps)
+            if self.cti is not None and self.cti.origin_frame is not None:
+                self.stats["reacquired_from_window"] += 1
+                self.log(f"  E115: re-acquired from held Frame {idx} "
+                         f"(CTI was waiting for {since}; {len(self._wins)} held)")
+                return True
+        return False
+
     def _frame_done(self, frame_idx, diag):
         self.n_frames += 1
         self.diag.append(dict(frame=frame_idx, coh=diag.get("coh"),
@@ -2200,6 +2457,7 @@ class LdmPipeline:
                  f"gate -- cold, waiting for a fresh L1 ***")
         self.cti.origin_frame = None
         self.l1_tries = 0
+        self.cold_floor = max(self.cold_floor, int(frame_idx))     # E123
 
     def drain(self):
         """CTI -> FEC -> Baseband, with the FEC either here or in the pool.
@@ -2217,7 +2475,16 @@ class LdmPipeline:
         if self.pool is not None and self.ph.state == "locked":
             return self._drain_pooled()
         out = []
-        blocks = self.cti.take_blocks()
+        # E120: a PROVISIONAL phase is judged after LOCK_BLOCKS Blocks, yet the
+        # probe decodes every Block available -- 35 a Frame, synchronously, on
+        # the main thread: 137 ms a Frame at 12 dB of added noise, where the
+        # E115 treadmill adopts and rejects a candidate every other Frame.
+        # With PROBE_BLOCKS set the probe takes that many; the rest stay in
+        # the CTI for the next drain (after a promote) or are rewound with the
+        # rejected phase.  The verdict's statistics change (k Blocks judge,
+        # not 35), so this is a knob with a measurement, not a default.
+        nmax = PROBE_BLOCKS if (PROBE_BLOCKS and self.ph.state == "probing") else None
+        blocks = self.cti.take_blocks(nmax=nmax)
         if not blocks:
             return out
         pc = time.perf_counter
@@ -2234,7 +2501,10 @@ class LdmPipeline:
             if nxt is None:
                 self.log("  *** every CTI phase candidate rejected by the FEC "
                          "-- cold, waiting for a fresh L1 ***")
+                since = self.cti.next_frame
                 self.cti.origin_frame = None
+                self.cold_floor = max(self.cold_floor, int(since))     # E123
+                self._reacquire_now(since)                 # E115
                 # the anchor is NOT cleared: a fresh L1 overrides it anyway,
                 # and until one arrives it is the only thing a sweep can be
                 # centred on
@@ -2251,8 +2521,11 @@ class LdmPipeline:
                     self.stats["phase_rejected_range"] += 1
                     self.log("  *** that candidate is out of range too -- "
                              "cold, waiting for a fresh L1 ***")
+                    since = self.cti.next_frame
                     self.cti.origin_frame = None
                     self.l1_tries = 0
+                    self.cold_floor = max(self.cold_floor, int(since))     # E123
+                    self._reacquire_now(since)             # E115
             return []
         if verdict == "promote":
             self.log(f"  *** CTI PHASE LOCKED: start_row {self.cti.start_row}, "
@@ -2267,11 +2540,15 @@ class LdmPipeline:
             # the FEC choose.  The anchor is deliberately KEPT; throwing it
             # away would leave nothing to sweep around and make the next
             # verified L1 the only way back.
+            anchor = self._loss_anchor(blocks[0][0])
             self.log("  *** CTI lock LOST (FEC collapsed over the last "
                      f"{self.ph.LOSS_WINDOW} batches) -- sweeping "
-                     f"+-{self.ph.SWEEP_K} Frames of commutator advance ***")
+                     f"+-{self.ph.SWEEP_K} Frames of commutator advance "
+                     f"from Frame {anchor} ***")
             self.stats["lock_lost"] += 1
-            self._begin(self.cti.next_frame, blind=True)
+            self._begin(anchor, blind=True)
+            if self.cti.origin_frame is None:
+                self._reacquire_now(anchor)                # E123
             return []
         # 4 -- Baseband Packets -> the transport's own format.
         #
@@ -2314,9 +2591,16 @@ class LdmPipeline:
     def _drain_pooled(self):
         pc = time.perf_counter
         out = []
-        lost = [False]
+        lost = [False, None]           # [tripped, first Block id of the tripping batch]
 
         def on_batch(first_id, pkts, nconv, nbch, err):
+            if lost[0]:
+                # E123: a verdict that lands after the loss tripped belongs to
+                # the index space we have stopped believing; whether it had
+                # already come back from the pool is timing, so it is neither
+                # counted nor emitted (discard_fec drops the rest).
+                self.stats["fec_after_loss"] += 1
+                return
             if err:
                 self.stats["worker_fec_error"] += 1
                 self.log(f"  FEC batch at Block {first_id} failed in worker: "
@@ -2328,14 +2612,28 @@ class LdmPipeline:
             v = self.ph.observe(nb, nbch)
             if v == "lost":
                 lost[0] = True
+                lost[1] = int(first_id)
                 return
             seg = self._packets_to_stream(pkts)
             if seg is not None:
                 out.append(seg)
 
+        # E123: before cutting more Blocks, settle every verdict old enough
+        # to matter for a deterministic re-anchor (see LOSS_LAG).
+        if LOSS_LAG and self.ph.state == "locked":
+            t = pc()
+            horizon = self.cti.next_frame - 1 - LOSS_LAG
+            deadline = time.time() + 30
+            while (not lost[0] and self.pool.fec_in_flight()
+                   and self.cti.frame_of_block(self.pool.forder[0]) <= horizon):
+                self.pool.collect_fec(on_batch, block=True)
+                if time.time() > deadline:
+                    self.stats["loss_lag_stalled"] += 1
+                    break
+            self.tm["loss_lag_wait"] += pc() - t
         # dispatch everything the CTI can cut, in Block order
         t = pc()
-        blocks = self.cti.take_blocks()
+        blocks = self.cti.take_blocks() if not lost[0] else []
         self.tm["cti_gather"] += pc() - t
         t = pc()
         i = 0
@@ -2362,13 +2660,30 @@ class LdmPipeline:
             # a Baseband stream spliced across a phase change is worse than a
             # gap, because the ALP walker cannot tell it happened.
             self.pool.discard_fec()
+            anchor = self._loss_anchor(lost[1])
             self.log("  *** CTI lock LOST (FEC collapsed over the last "
                      f"{self.ph.LOSS_WINDOW} batches) -- sweeping "
-                     f"+-{self.ph.SWEEP_K} Frames of commutator advance ***")
+                     f"+-{self.ph.SWEEP_K} Frames of commutator advance "
+                     f"from Frame {anchor} ***")
             self.stats["lock_lost"] += 1
-            self._begin(self.cti.next_frame, blind=True)
+            self._begin(anchor, blind=True)
+            if self.cti.origin_frame is None:
+                self._reacquire_now(anchor)                # E123
             return out
         return out
+
+    def _loss_anchor(self, first_id):
+        """E123: the Frame the blind sweep starts from after a lost lock."""
+        if not LOSS_LAG or first_id is None:
+            return self.cti.next_frame
+        anchor = self.cti.frame_of_block(first_id) + LOSS_LAG + 1
+        if anchor < self.cti.next_frame:
+            # the invariant did not hold (a stalled wait): say so, fall back
+            self.stats["loss_anchor_behind"] += 1
+            self.log(f"  E123: loss anchor Frame {anchor} is behind the CTI "
+                     f"({self.cti.next_frame}) -- anchoring there instead")
+            return self.cti.next_frame
+        return anchor
 
     # -- FEC ---------------------------------------------------------------
     def decode_blocks(self, cell_list):
@@ -2413,6 +2728,23 @@ class LdmPipeline:
                 out.append(by[i].tobytes())
             else:
                 out.append(None)
+        if _CELL_DUMP:
+            k = _CELL_DUMP_N[0]; _CELL_DUMP_N[0] += 1
+            if k % _CELL_DUMP_EVERY == 0:
+                try:
+                    os.makedirs(_CELL_DUMP, exist_ok=True)
+                    np.savez(os.path.join(_CELL_DUMP, f"cells_{os.getpid()}_{k:05d}.npz"),
+                             cells=cells.astype(np.complex64),
+                             pkts=np.array([p_ if p_ is not None else b"" for p_ in out], dtype=object),
+                             conv=np.asarray(conv),
+                             # syn is a Python list (bch_syndrome_batch returns
+                             # ints), so `syn == 0` was the scalar False in every
+                             # bank ever written (13.21).  Per Block, as intended.
+                             bch_ok=np.asarray([s_ == 0 for s_ in syn], bool),
+                             mod=str(ch.mod), rate=str(ch.rate), ninner=int(ch.ninner),
+                             kpayload=int(ch.kpayload))
+                except Exception:                                  # noqa: BLE001
+                    pass
         return out, nconv, nbch
 
     def summary(self):
@@ -2431,28 +2763,84 @@ class LdmPipeline:
         s["demod_ms_per_frame"] = {k: round(1000 * v / nf, 2)
                                    for k, v in (self.fd.tm.items()
                                                 if self.fd else [])}
-        if self.pool is not None:
-            s["pool"] = dict(procs=self.pool.nproc,
-                             threads=self.pool.threads,
-                             blas=self.pool.blas,
-                             stats=dict(self.pool.stats))
-            # worker_demod is WALL INSIDE THE WORKERS summed over all of
-            # them, so it is the cost the pool is hiding, not the cost the
-            # Frame pays.  Reported as both, because confusing them is how a
-            # pool gets credited with work it merely moved.
+        pr = (dict(procs=self.pool.nproc, threads=self.pool.threads,
+                   blas=self.pool.blas, stats=dict(self.pool.stats),
+                   tm=dict(self.pool.tm))
+              if self.pool is not None else self.pool_report)
+        if pr is not None:
+            s["pool"] = dict(procs=pr["procs"], threads=pr["threads"],
+                             blas=pr["blas"], stats=pr["stats"])
+            # Every pool timer is WALL INSIDE THE WORKERS (or in their queues)
+            # summed over all of them, so it is the cost the pool is hiding,
+            # not the cost the Frame pays.  Reported as both, because
+            # confusing them is how a pool gets credited with work it merely
+            # moved.  E117 adds the timeline around the arithmetic:
+            #   worker_qwait     job sat in in_q before a worker took it
+            #   worker_demod     fd.core_cells wall in the worker
+            #   out_q_latency    result done -> parent pumped it
+            #   park_wait        pumped -> released (waiting for ORDER)
+            #   submit_copy      the parent's 27 MB window copy into shm
+            # and the same four for the FEC jobs (fec_* / worker_fec).
             s["worker_demod_ms_per_frame"] = round(
-                1000 * self.pool.tm.get("worker_demod", 0.0) / nf, 2)
+                1000 * pr["tm"].get("worker_demod", 0.0) / nf, 2)
             s["worker_fec_ms_per_frame"] = round(
-                1000 * self.pool.tm.get("worker_fec", 0.0) / nf, 2)
-            s["pool_demod_ms_per_frame"] = {
-                k: round(1000 * v / nf, 2) for k, v in self.pool.tm.items()
-                if not k.startswith("worker_")}
+                1000 * pr["tm"].get("worker_fec", 0.0) / nf, 2)
+            s["pool_ms_per_frame"] = {
+                k: round(1000 * v / nf, 2) for k, v in pr["tm"].items()}
         return s
 
 
 # ---------------------------------------------------------------------------
 # batched BICM + LDPC for the 64K codes (the same shape m9_fast uses at 16K)
 # ---------------------------------------------------------------------------
+
+# E111 (2026-11-07): the compiled equaliser (E103/E106's cellpool_kernel.c) and
+# the nearest-point search (E105's demap_kernel.c) on the LDM path.  Both live
+# on the m9_fast path and were gated bit-exact there; here the referee is
+# lab/gate_e111_ldm_kernels.py -- the equalised POOL and the CPE output are
+# bit-identical with the kernels on and off.  Off: ATSC3_LDM_CELLPOOL_KERNEL=0
+# / ATSC3_LDM_CPE_KERNEL=0, or set use_cellpool_kernel / use_cpe_kernel on the
+# FrameDemod.  Why it is a double win: the C runs under ctypes, which drops the
+# GIL, so the thread map over pilot classes -- which the numpy loops serialised
+# on the GIL (measured 1/2/4/10 threads = 275/225/198/195 ms, a plateau) -- can
+# now actually run in parallel; and it is pure C, with no BLAS to nest inside
+# the LDM thread pool (the hazard _point_metric exists to avoid).
+_LDM_CELLPOOL_KERNEL = os.environ.get("ATSC3_LDM_CELLPOOL_KERNEL", "1") != "0"
+_LDM_CPE_KERNEL = os.environ.get("ATSC3_LDM_CPE_KERNEL", "1") != "0"
+
+
+def _ldm_cellpool_kern():
+    try:
+        import m9_fast as _F9
+        return _F9._cellpool_lib() or None
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def _ldm_cpe_kern():
+    try:
+        import m9_fast as _F9
+        return _F9._demap_lib() or None
+    except Exception:                                              # noqa: BLE001
+        return None
+
+
+def _ldm_ktabs(tb):
+    """C-contiguous typed views of one pilot class's geometry, cached on the
+    class table -- it is frame-constant (m9_fast's _ktabs_sm, verbatim)."""
+    k = tb.get("_kcs")
+    if k is None:
+        sg = tb["g"]
+        k = tb["_kcs"] = dict(
+            bins_d=np.ascontiguousarray(sg["bins_d"], np.int32),
+            dmap=np.ascontiguousarray(sg["d"], np.int32),
+            hmat=np.ascontiguousarray(tb["Hmat"], np.int32),
+            bins_pk=np.ascontiguousarray(sg["bins_pk"], np.int32),
+            refpk=np.ascontiguousarray(sg["refpk"], np.complex128),
+            jj=np.ascontiguousarray(tb["j"], np.int32),
+            wt=np.ascontiguousarray(tb["wt"], np.float64))
+    return k
+
 
 def _point_metric(zr, zi, pr, pi, p2):
     """|p|^2 - 2 Re(z conj(p)) for every point, WITHOUT calling BLAS.
@@ -2549,7 +2937,12 @@ def ldpc_batch(lam2d, ch, gpu=None, iters=50, ex=None, threads=4, alpha=None):
         bits[sel] = b[take]
         bad[sel] = d[take]
         conv[sel] = c[take]
-        todo = todo[~c]
+        if LADDER_NEAR > 0:
+            # E125: only the near misses get another rung
+            near_t = LADDER_NEAR * len(ch.checks)
+            todo = todo[~c & (d < near_t)]
+        else:
+            todo = todo[~c]
     if len(todo) and SP_RESCUE:
         # E86: the E58/E60 margin work landed in m9_fast and NEVER reached
         # this path, so the LDM carrier -- the WEAKER of the two -- has been
@@ -2581,7 +2974,34 @@ def ldpc_batch(lam2d, ch, gpu=None, iters=50, ex=None, threads=4, alpha=None):
     return bits, conv, bad
 
 
+# E112 sizing (2026-11-07): an env-driven record of what the LDPC actually does
+# per block -- iterations to converge (`its`, = iters when it never did) and the
+# final syndrome weight (`bad`) -- for every call, plus the LLR block itself
+# every ATSC3_LDPC_DUMP_EVERY-th call, so the convergence trajectory can be
+# re-run offline at many iteration caps.  Off unless ATSC3_LDPC_DUMP names a
+# directory.  A wrapper, so the decode path below is untouched.
+_LDPC_DUMP = os.environ.get("ATSC3_LDPC_DUMP")
+_LDPC_DUMP_EVERY = max(1, int(os.environ.get("ATSC3_LDPC_DUMP_EVERY", "8")))
+_LDPC_DUMP_N = [0]
+
+
 def _ldpc_cpu(lam2d, ch, alpha, iters, ex=None, threads=4):
+    r = _ldpc_cpu_inner(lam2d, ch, alpha, iters, ex, threads)
+    if _LDPC_DUMP and len(lam2d):
+        n = _LDPC_DUMP_N[0]; _LDPC_DUMP_N[0] += 1
+        keep = (n % _LDPC_DUMP_EVERY) == 0
+        try:
+            np.savez(os.path.join(_LDPC_DUMP, f"ldpc_{os.getpid()}_{n:05d}.npz"),
+                     lam=(np.asarray(lam2d, np.float32) if keep
+                          else np.zeros((0, 0), np.float32)),
+                     conv=np.asarray(r[1]), its=np.asarray(r[2]), bad=np.asarray(r[3]),
+                     alpha=float(alpha), iters=int(iters), ninner=int(ch.ninner))
+        except Exception:                                          # noqa: BLE001
+            pass
+    return r
+
+
+def _ldpc_cpu_inner(lam2d, ch, alpha, iters, ex=None, threads=4):
     nb = len(lam2d)
     if nb == 0:
         return (np.empty((0, ch.ninner), np.uint8), np.zeros(0, bool),
@@ -2590,6 +3010,15 @@ def _ldpc_cpu(lam2d, ch, alpha, iters, ex=None, threads=4):
     step = (nb + nch - 1) // nch
     sls = [slice(i * step, min(nb, (i + 1) * step))
            for i in range(nch) if i * step < nb]
+
+    # E107/E110: the layered eight-lane kernel (and its two-minimum
+    # correction) for the LDM/CTI path too -- the same flags as m9_fast
+    # (ATSC3_LDPC_LAYERED, default on; ATSC3_LDPC_BOXPLUS, default off), the
+    # same fallback to the flooding kernel when it cannot serve the call.
+    if LD.LAYERED_DEFAULT:
+        r = LD.layered_decode_batch(lam2d, ch.checks, ch.ninner, iters=iters, alpha=alpha, ex=ex)
+        if r is not None:
+            return r
 
     def one(sl):
         return LD.min_sum_decode_batch(lam2d[sl], ch.checks, ch.ninner,

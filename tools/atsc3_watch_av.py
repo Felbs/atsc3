@@ -34,6 +34,7 @@ import argparse
 import glob
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -41,8 +42,116 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
-# audio-track map for this mux: English 5.1 main vs Spanish SAP stereo pair
+# audio-track map for RF33's mux: English 5.1 main vs Spanish SAP stereo pair.
+# 13.25: these are RF33's PIDs.  RF25's LDM carrier writes video pid 5017 and
+# audio 5018 / 5019, and this orchestrator waited two minutes for
+# live_video_pid12.m4s beside a 27 MB live_video_pid5017.m4s.  The lanes are
+# now DISCOVERED from the chain's live.json (kind "video" = the MMTP service
+# the viewer plays, E95; kind "audio" sorted by pid: lowest = the main
+# programme, 5.1 element; next = the simulcast pair) and this map is only the
+# fallback when live.json names no audio lane.
 LANG = {"eng": (13, "5_X"), "spa": (14, "pair")}
+
+
+def _windows_job():
+    """A Job Object that kills every assigned process when its last handle
+    closes -- i.e. when THIS process dies, however it dies.
+
+    13.26: the orchestrator's `finally: teardown()` runs on a window close
+    or Ctrl-C, but not on TerminateProcess -- a `timeout` wrapper, Task
+    Manager, a closed terminal.  Observed 13.25: the chain was torn down
+    from outside, the audio workers lost their lanes and died, the
+    supervisor respawned two of them in the seconds before it was killed
+    itself, and they lived on holding files in the live dir.  Windows
+    has a primitive for exactly this; Linux gets a SIGTERM handler (below)
+    that routes into the same `finally`.  Returns the handle, or None when
+    the box refuses (an outer job without nesting -- Windows 7)."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.windll.kernel32
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_ulonglong) for n in
+                        ("ReadOperationCount", "WriteOperationCount",
+                         "OtherOperationCount", "ReadTransferCount",
+                         "WriteTransferCount", "OtherTransferCount")]
+
+        class BASIC(ctypes.Structure):
+            _fields_ = [("PerProcessUserTimeLimit", ctypes.c_longlong),
+                        ("PerJobUserTimeLimit", ctypes.c_longlong),
+                        ("LimitFlags", wintypes.DWORD),
+                        ("MinimumWorkingSetSize", ctypes.c_size_t),
+                        ("MaximumWorkingSetSize", ctypes.c_size_t),
+                        ("ActiveProcessLimit", wintypes.DWORD),
+                        ("Affinity", ctypes.c_size_t),
+                        ("PriorityClass", wintypes.DWORD),
+                        ("SchedulingClass", wintypes.DWORD)]
+
+        class EXTENDED(ctypes.Structure):
+            _fields_ = [("BasicLimitInformation", BASIC),
+                        ("IoInfo", IO_COUNTERS),
+                        ("ProcessMemoryLimit", ctypes.c_size_t),
+                        ("JobMemoryLimit", ctypes.c_size_t),
+                        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                        ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+        info = EXTENDED()
+        info.BasicLimitInformation.LimitFlags = 0x2000   # KILL_ON_JOB_CLOSE
+        JobObjectExtendedLimitInformation = 9
+        if not k32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
+                                           ctypes.byref(info), ctypes.sizeof(info)):
+            k32.CloseHandle(job)
+            return None
+        return job
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _job_assign(job, proc):
+    """Put a child in the job; False when Windows refuses (logged once)."""
+    if job is None:
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.AssignProcessToJobObject(
+            job, int(proc._handle)))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def discover_lanes(live, timeout, min_video_bytes=400_000):
+    """Wait for the chain's live.json to list a video lane with bytes on disk;
+    -> (video_path, [(pid, element), ...] audio lanes by pid) or None."""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            import json
+            with open(os.path.join(live, "live.json")) as f:
+                d = json.load(f)
+            lanes = d.get("lanes") or {}
+            vids = [l for l in lanes.values() if l.get("kind") == "video" and l.get("path")]
+            vids = [l for l in vids if os.path.exists(l["path"])
+                    and os.path.getsize(l["path"]) >= min_video_bytes]
+            if vids:
+                vid = sorted(vids, key=lambda l: l.get("pid", 1 << 30))[0]
+                auds = sorted((l for l in lanes.values() if l.get("kind") == "audio"),
+                              key=lambda l: l.get("pid", 1 << 30))
+                elements = ["5_X", "pair"]
+                # 13.26: (pid, element, lang) -- lang from live.json (the
+                # chain reads it off the mdhd / the SLS), None when unsaid
+                aud = [(int(l["pid"]), elements[min(i, 1)], l.get("lang") or None)
+                       for i, l in enumerate(auds)]
+                return vid["path"], aud
+        except Exception:                                      # noqa: BLE001
+            pass
+        time.sleep(0.5)
+    return None
 
 
 def log(m):
@@ -181,6 +290,8 @@ def main():
         shutil.rmtree(tvdir, ignore_errors=True)
 
     procs = []
+    job = _windows_job()
+    job_warned = [False]
 
     def spawn(cmd, quiet=True):
         p = subprocess.Popen(
@@ -189,7 +300,20 @@ def main():
             stderr=subprocess.STDOUT if quiet else None)
         p._av_cmd = list(cmd)          # E111: so the supervisor can respawn
         procs.append(p)
+        if job is not None and not _job_assign(job, p) and not job_warned[0]:
+            job_warned[0] = True
+            log("NOTE: Windows refused the kill-on-close job for a child; "
+                "an external kill of this orchestrator may leave workers behind")
         return p
+
+    # 13.26 (Linux): SIGTERM -> KeyboardInterrupt -> the `finally` below.
+    if not sys.platform.startswith("win"):
+        def _term(*_):
+            raise KeyboardInterrupt
+        try:
+            signal.signal(signal.SIGTERM, _term)
+        except Exception:                                      # noqa: BLE001
+            pass
 
     try:
         # 1. chain: video + audio + caption lanes; owns the radio
@@ -215,6 +339,17 @@ def main():
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
                        "--extra", ("--assets all " + extra).strip()])
         log(f"chain up (pid {chain.pid}) -- RF{a.rf} on {a.ant}")
+        # 13.25: learn the lanes from the chain before spawning anything that
+        # needs a PID.  The LDM pool warms for ~25 s before the first Frame.
+        log("waiting for the chain's video lane (live.json) ...")
+        found = discover_lanes(live, 150)
+        if found is None:
+            log("FATAL: no video lane within 150 s -- carrier receivable?")
+            return 1
+        video, audio_lanes = found
+        log(f"lanes: video {os.path.basename(video)}; audio "
+            + (", ".join(f"pid {p_} ({e_}{', ' + l_ if l_ else ''})"
+                         for p_, e_, l_ in audio_lanes) or "NONE in live.json"))
 
         # 2. audio workers: BOTH languages, each its own process reading
         #    the lane file (E98). The 5.1 main -> live_audio.wav (6 ch,
@@ -224,9 +359,28 @@ def main():
         #    track 2 -- it never fails the chunk.
         ncpu = os.cpu_count() or 1
         both = a.both_langs if a.both_langs is not None else ncpu >= 8
-        pid_e, el_e = LANG[a.lang]
         other = "spa" if a.lang == "eng" else "eng"
-        pid_s, el_s = LANG[other]
+        by_lang = {l_: (p_, e_) for p_, e_, l_ in audio_lanes if l_}
+        if a.lang in by_lang and (other in by_lang or len(audio_lanes) == 1):
+            # 13.26: by the language the lanes DECLARE (mdhd / SLS @lang)
+            pid_e, el_e = by_lang[a.lang]
+            pid_s, el_s = by_lang.get(other, by_lang[a.lang])
+            if other not in by_lang:
+                both = False
+        elif len(audio_lanes) >= 2:
+            # unsaid: by pid, eng = the main programme (lowest), spa = the simulcast
+            pid_e, el_e, _ = audio_lanes[0 if a.lang == "eng" else 1]
+            pid_s, el_s, _ = audio_lanes[1 if a.lang == "eng" else 0]
+            if a.lang in by_lang or other in by_lang:
+                log(f"NOTE: only one audio lane declares a language "
+                    f"({by_lang}); picking the other by pid order")
+        elif len(audio_lanes) == 1:
+            pid_e, el_e, _ = audio_lanes[0]
+            pid_s, el_s = pid_e, el_e
+            both = False
+        else:
+            pid_e, el_e = LANG[a.lang]
+            pid_s, el_s = LANG[other]
         # quiet=False (E116): the worker's pass lines carry n_bad, pads and
         # hf_fail -- the audio-quality telemetry; DEVNULL made them invisible
         # E118 (8/23): --start-behind 60 on EVERY worker spawn. Without it
@@ -265,13 +419,9 @@ def main():
                           "--out", os.path.join(live, "live.srt")])
             log(f"caption worker up (pid {subs.pid})")
 
-        # wait for the chain to actually produce video + audio lanes
-        video = os.path.join(live, "live_video_pid12.m4s")
+        # wait for the decoded audio (the video lane is already there, above)
         wav = os.path.join(live, "live_audio.wav")
-        log("waiting for video + decoded audio ...")
-        if not wait_for(video, 400_000, 120):
-            log("FATAL: no video within 120 s -- carrier receivable?")
-            return 1
+        log("waiting for decoded audio ...")
         if not wait_for(wav, 200_000, 120):
             log("FATAL: no decoded audio within 120 s")
             return 1
@@ -309,17 +459,29 @@ def main():
         # wrong as a permanent state. rc=42 -> respawn, always. Any other
         # death -> respawn too, but stampede-gated (4/hour) so a crash loop
         # cannot eat the box; past the gate it logs loudly and stays down.
+        # 13.26: the chain owns the radio.  When IT is gone -- its radio
+        # yielded for good, a replay reached its end, a kill from outside --
+        # there is nothing to respawn a worker FOR: its lane stops growing
+        # and it exits, and a fresh copy would just do the same (the two
+        # orphans of 13.25 were exactly this).  Chain dead -> shut down.
         deaths = []
         while tvp.poll() is None:
             time.sleep(2.0)
+            if chain.poll() is not None:
+                log(f"chain exited (rc={chain.returncode}) -- the radio owner "
+                    f"is gone; shutting down, respawning nothing")
+                break
             for w in list(procs):
-                if w is tvp or w.poll() is None:
+                if w is tvp or w is chain or w.poll() is None:
                     continue
                 rc_w = w.returncode
                 cmd_w = getattr(w, "_av_cmd", None)
                 procs.remove(w)
                 name = (os.path.basename(cmd_w[1]) if cmd_w and len(cmd_w) > 1
                         else "worker")
+                if tvp.poll() is not None or chain.poll() is not None:
+                    log(f"{name} exited rc={rc_w} during shutdown -- not respawned")
+                    continue
                 if cmd_w is None:
                     log(f"{name} exited rc={rc_w} and cannot be respawned")
                     continue
@@ -338,8 +500,10 @@ def main():
                     log(f"{name} rolled its wav (rc=42) -- respawning, as "
                         f"the contract says")
                 spawn(cmd_w)
-        rc = tvp.returncode
-        log(f"viewer exited (rc={rc}) -- shutting down")
+        if tvp.poll() is None:
+            log("stopping the viewer")
+        else:
+            log(f"viewer exited (rc={tvp.returncode}) -- shutting down")
         return 0
     except KeyboardInterrupt:
         return 0

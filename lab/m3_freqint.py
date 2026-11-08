@@ -68,7 +68,30 @@ def offset_word(nfft, l):
     return _bits_to_int(g)
 
 
+# E113 (2026-11-07): the sequence is FRAME-CONSTANT -- a function of (nfft, l,
+# n_data, direction, toggle) only -- and the generator below is a pure-Python
+# LFSR over nmax iterations: measured 30 ms per call on 8K.  The data symbols'
+# sequences were already built once in the demod's tables; the PREAMBLE path
+# called this fresh every Frame, twice -- 60 ms of a 163 ms LDM core_cells.
+# Cached here, for every caller, and each caller gets its OWN COPY (45 KB,
+# microseconds), so no caller can see another's mutation: bit-identical to the
+# uncached call by construction.  Referees: gate_e111 (the LDM pool holds the
+# preamble cells), gate_e107 (RF33 bytes, both PLPs), the RF25 replay (lanes).
+import functools as _functools
+
+
+@_functools.lru_cache(maxsize=512)
+def _interleaving_sequence_cached(nfft, l, n_data, direction, toggle):
+    return _interleaving_sequence_impl(nfft, l, n_data, direction, toggle)
+
+
 def interleaving_sequence(nfft, l, n_data, direction="forward", toggle="i"):
+    """H_l(p) for p = 0 .. n_data-1 (A/322 7.3), from the cache; a fresh copy."""
+    return _interleaving_sequence_cached(int(nfft), int(l), int(n_data),
+                                        str(direction), str(toggle)).copy()
+
+
+def _interleaving_sequence_impl(nfft, l, n_data, direction="forward", toggle="i"):
     """H_l(p) for p = 0 .. n_data-1  (A/322 7.3).
 
     Returns an int array `H` where, for 8K/16K, A[p] = X[H[p]]: the cell that

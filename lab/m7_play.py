@@ -74,6 +74,49 @@ def mdhd_timescale(init, handler=None):
     return fallback
 
 
+def mdhd_lang(init, handler=None):
+    """moov/trak/mdia/mdhd -> the track's ISO 639-2 language ("eng", "spa"),
+    or None when the field is absent or "und".
+
+    13.26: the RF25 MMTP service names no language anywhere the chain had
+    looked, so the orchestrator picked "eng" = the lower pid.  The MPU
+    metadata (the init segment every lane already carries) says it in the
+    mdhd: 5018 eng, 5019 spa, 5020 eng.  Same trak selection as
+    `mdhd_timescale`: the trak whose hdlr matches `handler`, else the first
+    non-hint trak.  Three 5-bit fields, each + 0x60.
+    """
+    fallback = None
+    for o, sz, t in boxes(init):
+        if t != b"moov":
+            continue
+        for o2, sz2, t2 in boxes(init, o + 8, o + sz):
+            if t2 != b"trak":
+                continue
+            hd = code = None
+            for o3, sz3, t3 in boxes(init, o2 + 8, o2 + sz2):
+                if t3 != b"mdia":
+                    continue
+                for o4, sz4, t4 in boxes(init, o3 + 8, o3 + sz3):
+                    if t4 == b"hdlr":
+                        hd = bytes(init[o4 + 16:o4 + 20])
+                    elif t4 == b"mdhd":
+                        ver = init[o4 + 8]
+                        p = o4 + 12 + (16 if ver else 8)        # timescale
+                        p += 4 + (8 if ver else 4)              # + duration
+                        v = int.from_bytes(init[p:p + 2], "big")
+                        code = "".join(chr(((v >> sh) & 31) + 0x60)
+                                       for sh in (10, 5, 0))
+                        if not code.isalpha() or code == "und":
+                            code = None
+            if code is None:
+                continue
+            if handler is not None and hd == handler:
+                return code
+            if hd != b"hint" and fallback is None:
+                fallback = code
+    return fallback
+
+
 def boxes(d, start=0, end=None):
     end = len(d) if end is None else end
     o = start

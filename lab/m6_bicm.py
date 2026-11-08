@@ -326,6 +326,22 @@ class PlpChain:
         self.checks = LD.parity_check(rate, ninner)
         self.idx, self.mask = LD.pack(self.checks, ninner)
         self.iters = iters
+        # E121 (2026-11-07): the ladder is per CODE, and M10's (1.0, 0.85,
+        # 0.75) was measured on the 64800 rate-6/15 code.  On the 64800
+        # rate-9/15 core RF25 carries, with the E110 correction on, the
+        # per-block record said the opposite: alpha 1.0 converged NOTHING at
+        # 12 dB of added noise and marked as hopeless (E112, sweep 8) blocks
+        # that 0.85 then decoded, and 0.75 rescued 1 block for 30% of all
+        # sweeps.  gate_e121_ladder.py on 1,136 banked real-air blocks at two
+        # noise levels: (0.82, 0.85, 1.0) loses no block, gains 3 and 66
+        # (+46% at 12 dB), 14% fewer vector-sweeps, bits identical on every
+        # shared block.  Only that code, only with the correction on (the
+        # scale the gate ran at); ATSC3_LDPC_LADDER="a,b,c" overrides for any.
+        lad = os.environ.get("ATSC3_LDPC_LADDER")
+        if lad:
+            self.ALPHA_LADDER = tuple(float(x) for x in lad.split(","))
+        elif ninner == 64800 and str(rate) == "9/15" and LD.BOXPLUS_DEFAULT:
+            self.ALPHA_LADDER = (0.82, 0.85, 1.0)
 
     # -- receive ----------------------------------------------------------
     def llr(self, cells, sigma2=None):

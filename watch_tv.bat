@@ -6,5 +6,5 @@ REM  - per-chunk health log: Z:\src\atsc3\lab\av_live\_tv\telemetry.jsonl
 REM  - don't want captions? delete  --cc  below
 REM  - Spanish audio? use the "Watch ATSC3 TV (Spanish)" shortcut
 cd /d Z:\src\atsc3
-"C:\Users\emane\radioconda\python.exe" tools\atsc3_watch_av.py --rf 33 --ant "Antenna B" --lang eng --cc
+"%USERPROFILE%\radioconda\python.exe" tools\atsc3_watch_av.py --rf 33 --ant "Antenna B" --lang eng --cc
 pause

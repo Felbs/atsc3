@@ -95,8 +95,22 @@ def text_of(p):
 
 
 def secs(v):
+    """A TTML time: offset-time (12.5s, 500ms, 2m, 1h) or clock-time
+    (HH:MM:SS.fff, or HH:MM:SS:ff with frames at 30).  13.25: RF25's IMSC1
+    documents use clock-time with the hours counted from an epoch
+    (498368:29:28.234), which this read as a float and died on, five times
+    an hour, under the live viewer.  The anchor arithmetic in main() only
+    needs every cue on ONE clock, which they are either way."""
     v = v.strip()
-    return float(v[:-1]) if v.endswith("s") else float(v)
+    if ":" in v:
+        parts = v.split(":")
+        h, m = int(parts[0]), int(parts[1])
+        s_ = float(parts[2]) if len(parts) == 3 else float(parts[2]) + float(parts[3]) / 30.0
+        return h * 3600.0 + m * 60.0 + s_
+    for suf, k in (("ms", 1e-3), ("s", 1.0), ("m", 60.0), ("h", 3600.0)):
+        if v.endswith(suf):
+            return float(v[:-len(suf)]) * k
+    return float(v)
 
 
 def collapse(cues):

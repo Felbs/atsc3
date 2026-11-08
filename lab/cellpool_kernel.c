@@ -185,6 +185,19 @@ static inline void cmul(double ar, double ai, double br, double bi,
  *   H  = Hc * cl                       (complex multiply, numpy's ordering)
  *   z  = Yrow[bins_d[i]] / H
  *
+ * E111 (2026-11-07), MEASURED on the LDM path (m44, RF25, every row
+ * smoothed, cl complex): the interpolation and the division come back
+ * bit-identical to numpy; the `H = Hc * cl` step does not, by ~1 ULP in a
+ * third of the cells.  Not this kernel's doing -- cmul above IS the textbook
+ * two-rounding form, and a scalar plain-double reference agrees with this
+ * kernel in 0 of 23,432 cells -- it is numpy's complex128 multiply, which
+ * reproduces neither the textbook form nor an FMA-contracted one (the
+ * derot_f64 note below measured the same thing first).  So on a smoothed
+ * row the pool is the plain-double result, within a few ULP of numpy's, and
+ * the law is derot_f64's: a tight bound on the pool plus bit-identity on
+ * everything downstream and on the DECODED BYTES (gate_e111_ldm_kernels.py).
+ * On an un-smoothed row there is no gain multiply and the pool is bit-exact.
+ *
  * Hg : ngrid complex128 -- this symbol's column of the smoothed pilot grid
  * cl : the per-symbol complex gain that rides OUTSIDE the boxcar (E60)
  */

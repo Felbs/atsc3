@@ -52,6 +52,7 @@ sys.path.insert(0, HERE)
 import m11_stream as ST                                           # noqa: E402
 import m6_cells as C                                              # noqa: E402
 import m6_payload as P6                                           # noqa: E402
+import m7_play as PL                                              # noqa: E402
 
 _sib = os.environ.get("ATSC3_SIBLING_TOOLS")            # optional sibling toolbox
 if _sib:
@@ -64,7 +65,7 @@ except Exception:                                                 # noqa: BLE001
 FRAME_SEC = ST.FRAME_SEC
 
 
-def _retune_tracker(fe, plan):
+def _retune_tracker(fe, plan, full_window=False):
     """Give the front end's timing tracker the Frame ADVANCE L1 signals --
     and only that.
 
@@ -82,6 +83,11 @@ def _retune_tracker(fe, plan):
     the plan, window untouched.
     """
     fe.frame_samples = plan.frame_samples
+    if full_window:
+        # M17 (--plp1): Subframe 1 lives in the second part of the Frame, so
+        # the window must span the whole Frame -- and _procs_start sizes the
+        # shared slots from the same plan when the flag is on.
+        fe.frame_window = plan.frame_window
     fe.ft.plan = plan
     fe.ft.frame_samples = plan.frame_samples
     fe.ft.reset()
@@ -118,6 +124,16 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
                                   iters=cfg["iters"],
                                   cpu_fast=cfg["cpu_fast"], plan=plan)
         fd.prewarm()
+        sf1 = None
+        if cfg.get("plp1") and plan is not None:
+            # M17: Subframe 1 / PLP 1 on the same Frame window
+            import m17_plp1_live as M17
+            spec = cfg["plan_spec"]
+            sf1 = M17.SubframeDecoder(fd, plan.g, spec["l1b"],
+                                      [tuple(f) for f in spec["fields"]], 1,
+                                      plp_id=cfg["plp1"].get("plp_id"),
+                                      comb=cfg["plp1"].get("comb", True))
+            sf1.prewarm()
         out_q.put(("ready", os.getpid()))
         while True:
             msg = in_q.get()
@@ -126,11 +142,20 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg):
             slot, idx, n, t0, coh = msg
             t = time.perf_counter()
             r16, pkts, diag = fd.decode_frame(buf[slot, :n], t0)
+            pkts1 = diag1 = None
+            if sf1 is not None:
+                rep1 = {}
+                pkts1, rep1 = sf1.decode(buf[slot, :n], t0, rep1)
+                diag1 = dict(converged=rep1["converged"], bch_ok=rep1["bch_ok"],
+                             n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0))
             out_q.put(("ok", (idx, slot, pkts,
                               dict(converged=diag["converged"],
                                    bch_ok=diag["bch_ok"]),
-                              time.perf_counter() - t, coh)))
-        out_q.put(("done", dict(fd.tm)))
+                              time.perf_counter() - t, coh, pkts1, diag1)))
+        tm_all = dict(fd.tm)
+        if sf1 is not None:
+            tm_all.update(sf1.tm)
+        out_q.put(("done", tm_all))
         fd.close()
         shm.close()
     except Exception as e:                                     # noqa: BLE001
@@ -200,6 +225,10 @@ class Watch:
         self.n_frames = 0
         self.n_conv = 0
         self.n_bch = 0
+        # M17: Subframe 1 / PLP 1 (its own Baseband stream and counters)
+        self.sf1 = None
+        self.bb_abs1 = 0
+        self.n_conv1 = self.n_bch1 = self.n_fec1 = self.n_comb1 = 0
         self.bb_abs = 0
         self.bad_run = 0
         self.stats = collections.Counter()
@@ -253,6 +282,11 @@ class Watch:
             self._sniffed = []
             if not pre:
                 self.src.start()
+            elif hasattr(self.src, "rebase"):
+                # a replay's clock was started by the sniff, before the
+                # decode pool warmed: pace from now, not from then
+                self.src.rebase()
+            resume_radio = bool(pre) and hasattr(self.src, "pause")
             for x in pre:
                 if self.stop.is_set():
                     break
@@ -264,6 +298,12 @@ class Watch:
                         break
                 else:
                     self.q_raw.put(x)
+            if resume_radio:
+                # E109: the radio was paused after the sniff while the pool
+                # warmed; the air in between is gone, so say so (one
+                # deliberate re-acquisition instead of overflows), and stream
+                self.q_raw.put("BREAK")
+                self.src.start()
             while not self.stop.is_set():
                 x = self.src.read()
                 if x is None:
@@ -344,7 +384,8 @@ class Watch:
         from multiprocessing import shared_memory
         a = self.a
         n = a.decode_procs
-        self.slot_len = ST.FRAME_WINDOW + 4096
+        plp1_on = bool(getattr(a, "plp1", False)) and getattr(self, "m9_plan", None) is not None
+        self.slot_len = (self.m9_plan.frame_window if plp1_on else ST.FRAME_WINDOW) + 4096
         self.nslots = n + 4
         self.shm = shared_memory.SharedMemory(
             create=True, size=self.nslots * self.slot_len * 16)
@@ -356,7 +397,10 @@ class Watch:
         cfg = dict(threads=a.threads, iters=a.iters,
                    cpu_fast=(a.accel == "cpu" and not a.exact_cpu),
                    plan_spec=(self.m9_plan.to_spec()
-                              if getattr(self, "m9_plan", None) else None))
+                              if getattr(self, "m9_plan", None) else None),
+                   plp1=(dict(comb=not getattr(a, "no_plp1_comb", False),
+                              plp_id=getattr(a, "plp1_id", None))
+                         if plp1_on else None))
         self.procs = [ctx.Process(
             target=_decode_proc_main,
             args=(self.shm.name, self.nslots, self.slot_len, self.d_in,
@@ -419,9 +463,9 @@ class Watch:
                 done_tm.update(payload)
                 return False
             if kind == "ok":
-                idx, slot, pkts, diag, dt_, coh = payload
+                idx, slot, pkts, diag, dt_, coh, *extra = payload
                 free.append(slot)
-                parked[idx] = (pkts, diag, dt_, coh)
+                parked[idx] = (pkts, diag, dt_, coh, *extra)
             while order and order[0] in parked:
                 self._decode_done(parked.pop(order.popleft()))
             return True
@@ -447,6 +491,9 @@ class Watch:
                     break
                 slot = free.pop()
                 n = len(w)
+                if os.environ.get("ATSC3_WIN_LOG"):
+                    print(f"  WINLOG frame {idx} window {n} fe.frame_window {getattr(self.fe, 'frame_window', None)} "
+                          f"slot_len {self.slot_len} t0 {t0}", file=sys.stderr, flush=True)
                 self.shm_buf[slot, :n] = w
                 self.d_in.put((slot, idx, n, t0, coh))
                 order.append(idx)
@@ -614,10 +661,17 @@ class Watch:
         idx, w, t0, coh = item
         t = time.perf_counter()
         r16, pkts, diag = self.fd.decode_frame(w, t0)
-        return pkts, diag, time.perf_counter() - t, coh
+        pkts1 = diag1 = None
+        if getattr(self, "sf1", None) is not None:
+            rep1 = {}
+            pkts1, rep1 = self.sf1.decode(w, t0, rep1)
+            diag1 = dict(converged=rep1["converged"], bch_ok=rep1["bch_ok"],
+                         n_fec=rep1["n_fec"], comb_used=rep1.get("comb_used", 0))
+        return pkts, diag, time.perf_counter() - t, coh, pkts1, diag1
 
     def _decode_done(self, res):
-        pkts, diag, dt_, coh = res
+        pkts, diag, dt_, coh, *extra = res
+        pkts1, diag1 = (list(extra) + [None, None])[:2]
         stream, bounds = bytearray(), []
         for p in pkts:
             if p is None:
@@ -655,8 +709,34 @@ class Watch:
         # Same rule one stage down. This put had NO timeout at all, so a
         # stalled transport blocked the decoder outright and the
         # back-pressure reached the reader every time.
+        self._put_bb((bytes(stream), bounds))
+        # M17: PLP 1's Baseband is its own stream with its own absolute
+        # offsets (the ALP anchors index THAT stream), tagged for the
+        # transport's second walker.  Its block counts never feed the
+        # weak-Frame / re-acquire logic above: that stays PLP 0's.
+        if pkts1 is not None:
+            stream1, bounds1 = bytearray(), []
+            for p in pkts1:
+                if p is None:
+                    continue
+                ptr, pay = P6.bb_split(p)
+                if ptr is not None:
+                    bounds1.append(self.bb_abs1 + len(stream1) + ptr)
+                stream1 += pay
+            self.bb_abs1 += len(stream1)
+            if os.environ.get("ATSC3_PLP1_LOG"):
+                print(f"  PLP1LOG frame {self.n_frames} converged {diag1['converged']}/{diag1['n_fec']} "
+                      f"bch {diag1['bch_ok']} comb {diag1.get('comb_used', 0)}", file=sys.stderr, flush=True)
+            with self.lock:
+                self.n_conv1 += diag1["converged"]
+                self.n_bch1 += diag1["bch_ok"]
+                self.n_fec1 += diag1["n_fec"]
+                self.n_comb1 += diag1.get("comb_used", 0)
+            self._put_bb((bytes(stream1), bounds1, 1))
+
+    def _put_bb(self, item):
         if self.lossless:
-            if not self._put_blocking(self.q_bb, (bytes(stream), bounds)):
+            if not self._put_blocking(self.q_bb, item):
                 # stop is already set (frame limit / EOF) but the transport
                 # is still draining towards its None: a put refused HERE
                 # sheds an already-decoded Frame's Baseband on a LOSSLESS
@@ -665,13 +745,12 @@ class Watch:
                 end = time.time() + 15
                 while time.time() < end and not self.err:
                     try:
-                        self.q_bb.put((bytes(stream), bounds), timeout=0.25)
+                        self.q_bb.put(item, timeout=0.25)
                         break
                     except queue.Full:
                         pass
         else:
-            drop_oldest(self.q_bb, (bytes(stream), bounds),
-                        self.stats, "bb_dropped")
+            drop_oldest(self.q_bb, item, self.stats, "bb_dropped")
 
     def t_transport(self):
         try:
@@ -679,8 +758,8 @@ class Watch:
                 item = self.q_bb.get()
                 if item is None:
                     break
-                stream, bounds = item
-                for seg in self.tr.feed(stream, bounds):
+                stream, bounds, *plp = item
+                for seg in self.tr.feed(stream, bounds, plp=(plp[0] if plp else 0)):
                     self._emit(seg)
             for seg in self.tr.flush():
                 self._emit(seg)
@@ -772,6 +851,10 @@ class Watch:
             if isinstance(x, bytes):
                 continue
             total += len(x)
+        if hasattr(self.src, "pause"):
+            # E109: the decode pool warms next; the radio must not stream
+            # into a buffer nobody drains (the reader resumes it)
+            self.src.pause()
         samples = [b for b in blocks if not isinstance(b, bytes)]
         if not samples:
             return blocks
@@ -805,7 +888,7 @@ class Watch:
             # the same call the LDM path relies on (m11_stream.adopt_plan).
             fe = getattr(self, "fe", None)
             if fe is not None:
-                _retune_tracker(fe, plan)
+                _retune_tracker(fe, plan, full_window=bool(getattr(self.a, "plp1", False)))
             return blocks
         if getattr(self.a, "ldm", "auto") == "off":
             return blocks
@@ -881,7 +964,7 @@ class Watch:
                               fast=(a.accel == "cpu" and not a.exact_cpu),
                               plan=self.plan if self.ldm else None)
         if not self.ldm and getattr(self, "m9_plan", None) is not None:
-            _retune_tracker(self.fe, self.m9_plan)
+            _retune_tracker(self.fe, self.m9_plan, full_window=bool(getattr(self.a, "plp1", False)))
         if not self.fe.rs.bypass:
             ST.log(f"  resampler ACTIVE: {rate/1e6:g} -> "
                    f"{ST.FS_POST/1e6:g} Msps (up={self.fe.rs.up} "
@@ -921,7 +1004,9 @@ class Watch:
                 accel=("gpu" if a.accel in ("gpu", "gpu-full") else "cpu"),
                 log=ST.log, procs=nproc,
                 proc_threads=a.ldm_proc_threads,
-                fec_threads=a.ldm_fec_threads or a.threads)
+                fec_threads=a.ldm_fec_threads or a.threads,
+                fec_procs=a.ldm_fec_procs,
+                fec_proc_threads=a.ldm_fec_proc_threads or a.ldm_proc_threads)
             self.pipe.adopt(self.plan)
             t_warm = time.time()
             self.pipe.prewarm()
@@ -940,6 +1025,19 @@ class Watch:
                                            plan=getattr(self, "m9_plan", None))
             t_warm = time.time()
             self.fd.prewarm()
+            if getattr(a, "plp1", False) and getattr(self, "m9_plan", None) is not None:
+                import m17_plp1_live as M17
+                spec = self.m9_plan.to_spec()
+                self.sf1 = M17.SubframeDecoder(
+                    self.fd, self.m9_plan.g, spec["l1b"],
+                    [tuple(f) for f in spec["fields"]], 1,
+                    plp_id=getattr(a, "plp1_id", None),
+                    comb=not getattr(a, "no_plp1_comb", False))
+                self.sf1.prewarm()
+                ST.log(f"  M17: Subframe 1 / PLP {self.sf1.plp['id']} decoder armed "
+                       f"({self.sf1.plp['mod']} {self.sf1.plp['rate']}, {len(self.sf1.hidx)} "
+                       f"Blocks a Frame, channel estimate "
+                       f"{'E104 delay-domain' if self.sf1.comb else 'linear'})")
             ST.log(f"  decoder prewarmed in {time.time() - t_warm:.2f} s "
                    f"(tables built before the clock, not under the first "
                    f"Frame)")
@@ -1083,6 +1181,9 @@ class Watch:
             # numerator with the pipeline's denominator reported 7172/7662
             # (93.6%) for a run the pipeline itself scored 7662/7662.  A
             # number assembled from two clocks is a wrong number.
+            plp1=(dict(fec_converged=self.n_conv1, bch_zero=self.n_bch1,
+                       fec_total=self.n_fec1, comb_symbols=self.n_comb1)
+                  if self.n_fec1 else None),
             fec_converged=(self.pipe.n_conv if self.ldm else self.n_conv),
             fec_total=(self.pipe.n_blocks if self.ldm
                        else int(round(self.blocks_per_frame))
@@ -1221,9 +1322,17 @@ class LiveWriter:
     def bytes(self):
         return sum(ln["bytes"] for ln in self.lanes.values())
 
-    def _lane(self, pid, handler, init, kind=None):
+    def _lane(self, pid, handler, init, kind=None, lang=None):
         ln = self.lanes.get(pid)
         if ln is None:
+            # 13.26: the lane's language, for live.json.  A ROUTE segment
+            # carries the Representation's @lang; an MMTP asset says it in
+            # its MPU metadata's mdhd (RF25: 5018 eng, 5019 spa, 5020 eng).
+            if lang is None and init:
+                try:
+                    lang = PL.mdhd_lang(init, handler)
+                except Exception:                                  # noqa: BLE001
+                    lang = None
             # The pid goes in the FILENAME, always. This multiplex carries
             # TWO `soun` assets (a second programme audio), and naming lanes
             # by handler alone made both open "live_audio.m4s" -- the second
@@ -1285,8 +1394,9 @@ class LiveWriter:
                                         media=0.0, name=name, kind=kind,
                                         pid=pid, idx=idx, first_seq=None,
                                         last_seq=None, init_bytes=len(init or b""),
-                                        generation=gen, tick_hz=None)
-            ST.log(f"  live lane: {kind} pid {pid} -> {os.path.basename(path)}")
+                                        generation=gen, tick_hz=None, lang=lang)
+            ST.log(f"  live lane: {kind} pid {pid} -> {os.path.basename(path)}"
+                   + (f" (lang {lang})" if lang else ""))
         return ln
 
     def write(self, init, seg):
@@ -1300,7 +1410,7 @@ class LiveWriter:
             return
         pid = seg.get("pid", 0)
         ln = self._lane(pid, seg.get("handler"), seg.get("init") or init,
-                        seg.get("lane_kind"))
+                        seg.get("lane_kind"), seg.get("lang"))
         body = seg["bytes"]
         off = ln["bytes"]
         ln["fh"].write(body)
@@ -1339,7 +1449,7 @@ class LiveWriter:
                     kind=ln["kind"], pid=ln["pid"],
                     first_seq=ln["first_seq"], last_seq=ln["last_seq"],
                     init_bytes=ln["init_bytes"],
-                    tick_hz=ln.get("tick_hz"),
+                    tick_hz=ln.get("tick_hz"), lang=ln.get("lang"),
                     idx=os.path.splitext(ln["path"])[0] + ".idx",
                     generation=ln.get("generation", 0),
                     handler=(ln["handler"] or b"?").decode("ascii", "replace"))
@@ -1501,6 +1611,13 @@ def main(argv=None):
                          "decode (m9_fast is subframe-0 only), so on air "
                          "this currently yields nothing. Explicit flow "
                          "only: the Widevine-locked services stay untouched.")
+    ap.add_argument("--plp1", action="store_true",
+                    help="M17: also decode Subframe 1 / PLP 1 live (the ROUTE/DASH "
+                         "services); name a flow with --route to carry it")
+    ap.add_argument("--plp1-id", type=int, default=None,
+                    help="PLP id in Subframe 1 (default: the lowest)")
+    ap.add_argument("--no-plp1-comb", action="store_true",
+                    help="PLP 1 channel estimate by linear interpolation instead of E104")
     ap.add_argument("--cpu-isolate", default=None,
                     help="pin the chain to these cores, e.g. 0-7 or 0,2,4 -- "
                          "preemption stalls the pipeline and overflows the SDR")
@@ -1537,6 +1654,12 @@ def main(argv=None):
                          "anything reaches the interleaver.  Default: 4 on a "
                          "24+ thread box, 2 on 8+, else 0.  0 = serial.")
     ap.add_argument("--ldm-proc-threads", type=int, default=4)
+    ap.add_argument("--ldm-fec-procs", type=int, default=0,
+                    help="E126: run the LDM FEC in N processes of their OWN, on their "
+                         "own queue, so no Frame demod shares a process with an LDPC "
+                         "batch.  0 (default) = the single-kind pool, byte for byte.")
+    ap.add_argument("--ldm-fec-proc-threads", type=int, default=None,
+                    help="threads per FEC process (E126).  Default: --ldm-proc-threads.")
     ap.add_argument("--ldm-fec-threads", type=int, default=None,
                     help="threads the PARENT gives the FEC once the demod has "
                          "left it.  Default: --threads.")
@@ -1625,6 +1748,16 @@ def main(argv=None):
                           else 4 if ncpu >= 24 else 2)
     if a.threads is None:
         a.threads = 16 if ncpu >= 8 else max(1, ncpu)
+    if getattr(a, "plp1", False) and a.accel == "cpu" and ncpu >= 8:
+        # E109 (2026-11-07, measured on live RF33, 12 cores, 60 s runs): with
+        # both PLPs the decode pool must leave the radio reader and the front
+        # end their cores.  5 x 2 kept 239 of 243 Frames; 4 x 3 shed 16, 6 x 2
+        # shed 65, 4 x 2 shed 106, and 16 threads a process thrashes outright.
+        # Only the values the user did not set are touched.
+        if "--decode-procs" not in sys.argv:
+            a.decode_procs = max(2, ncpu // 2 - 1)
+        if "--threads" not in sys.argv:
+            a.threads = 2
     if a.fe_threads is None:
         a.fe_threads = 16 if ncpu >= 8 else max(1, ncpu)
     if a.capture is None and in_meteor_window() and not a.force_meteor:
@@ -1668,6 +1801,10 @@ def main(argv=None):
         print(f"    LDM/CTI            phase {L['state']}, start_row "
               f"{L['start_row']}, C {L['C']}, origin Frame "
               f"{L['origin_frame']}  {L['phase']}  {L['stats']}")
+    if s.get("plp1"):
+        p1 = s["plp1"]
+        print(f"    PLP 1 (M17)        {p1['fec_converged']}/{p1['fec_total']} converged, "
+              f"{p1['bch_zero']} BCH zero, E104 estimate on {p1['comb_symbols']} symbols")
     print(f"    ALP resyncs        {s['alp'].get('resync', 0)}")
     print(f"    IP datagrams       {s['ip'].get('udp', 0)}")
     print(f"    MMTP               {s['mmtp'].get('complete', 0)} MPUs "
@@ -1723,6 +1860,19 @@ def main(argv=None):
     if tots and max(tots) > 0:
         print(f"      HEADROOM   slowest stage {b/max(tots):5.2f}x, "
               f"stages summed {b/max(sum(tots), 1e-9):5.2f}x")
+    pm = (s.get("ldm") or {}).get("pool_ms_per_frame")
+    if pm:
+        # E117: the pool's own timeline, summed over ALL workers per Frame
+        # (so a worker stage can exceed the budget without being late).
+        order = ("worker_qwait", "worker_demod", "out_q_latency", "park_wait",
+                 "submit_copy", "fec_worker_qwait", "worker_fec",
+                 "fec_out_q_latency", "fec_park_wait", "fec_submit_copy")
+        line = "  ".join(f"{k} {pm[k]:.1f}" for k in order if k in pm)
+        stages = "  ".join(f"{k} {v:.1f}" for k, v in
+                           sorted(pm.items(), key=lambda kv: -kv[1])
+                           if k not in order)
+        print(f"      pool (sum over workers, per Frame)  {line}")
+        print(f"      pool demod stages                   {stages}")
     if s.get("margin_counters"):
         print("      E60        " + "  ".join(
             f"{k[2:]} {v}" for k, v in sorted(s["margin_counters"].items())))

@@ -171,6 +171,7 @@ class AudioTrack:
         self.wav_base = None          # sample offset of first_seq (E45)
         self.state = None             # worker state.json, the fallback anchor
         self.ch = 2
+        self.coded = None             # 13.26: channels the stream CODES (worker)
         am = read_json(os.path.join(live_dir, sidecar))
         self.gen = None
         if am:
@@ -178,6 +179,7 @@ class AudioTrack:
             self.pid = am.get("pid")
             self.wav_base = am.get("wav_base")
             self.gen = am.get("generation")
+            self.coded = am.get("channels_coded")
             self.path = resolve(live_dir, am.get("path"))
         if self.path:
             st = read_json(os.path.splitext(self.path)[0] + ".state.json")
@@ -200,6 +202,8 @@ KIND_SUFFIX = ""          # "" for MMTP lanes, "route_" for ROUTE lanes
 
 
 class Session:
+    #: 13.26: False = --acpl-as-51, the 13.25 shape (6-ch AC-3, four silent) for A/B
+    ACPL_STEREO = True
     """One continuous timeline over one lane generation."""
 
     def __init__(self, live_dir, t_base):
@@ -227,6 +231,13 @@ class Session:
                 self.eng_ch = wave.open(self.eng.path).getnchannels()
             except Exception:                                  # noqa: BLE001
                 pass
+        # 13.26: a 6-channel wav whose stream codes two (ASPX_ACPL_3, RF25's
+        # 5.1) is muxed as stereo -- the honest shape, and the receiver's own
+        # upmix then has something to work on instead of four silent channels.
+        self.acpl_stereo = (self.eng_ch == 6 and self.eng.coded == 2
+                            and Session.ACPL_STEREO)
+        if self.acpl_stereo:
+            self.eng_ch = 2
 
     def ok(self):
         return self.vid is not None
@@ -310,7 +321,11 @@ def audio_slice(sess, live_dir, s_lo, s_hi, track, want_ch=2):
             if nch == want_ch:
                 out[i * SPF:(i + 1) * SPF] = seg
             elif nch == 6 and want_ch == 2:
-                out[i * SPF:(i + 1) * SPF] = _downmix(seg)
+                # 13.26: a stereo-coded stream in a 6-ch wav is L/R as
+                # decoded -- no ITU fold, no 0.7 (nothing to fold, and
+                # the fold alone would drop it 3 dB)
+                out[i * SPF:(i + 1) * SPF] = (seg[:, :2] if getattr(track, "coded", None) == 2
+                                              else _downmix(seg))
             elif nch == 2 and want_ch == 6:
                 out[i * SPF:(i + 1) * SPF, :2] = seg      # L/R, rest silent
         w.close()
@@ -1755,6 +1770,9 @@ def main():
                     help="pre-E61 behaviour: per-chunk audio-hold even "
                          "when the worker wav is dead (the E42 metronome; "
                          "kept real as the gate's negative control)")
+    ap.add_argument("--acpl-as-51", action="store_true",
+                    help="13.26 A/B: mux an ASPX_ACPL_3 (2-coded) programme as 5.1 AC-3 "
+                         "with four silent channels, as 13.25 did, instead of stereo mp2")
     ap.add_argument("--stereo", action="store_true",
                     help="v2: downmix a 5.1 main to stereo mp2 instead of "
                          "passing it through as AC-3 5.1 (E98)")
@@ -1774,6 +1792,7 @@ def main():
                          "indefinitely never treats a dead player as "
                          "operator intent.")
     a = ap.parse_args()
+    Session.ACPL_STEREO = not a.acpl_as_51
     # E95: select the SERVICE FAMILY before anything reads a lane.
     global VIDEO_KIND, KIND_SUFFIX
     if getattr(a, "transport", "mmtp") == "route":
@@ -1781,11 +1800,18 @@ def main():
     d = a.live_dir
     # ONE viewer per live dir: two would open two VLC windows playing out of sync
     # (seen 2026-11-02 after an overlapping restart). The lock dies with the process.
-    import fcntl
+    # fcntl is POSIX-only; Windows takes the same exclusive, non-blocking
+    # byte-range lock through msvcrt (2026-11-07: the viewer died on import
+    # on the 32-core Windows box while the chain, audio and captions ran).
     global _VIEWER_LOCK
     _VIEWER_LOCK = open(os.path.join(d, ".viewer.lock"), "w")
     try:
-        fcntl.flock(_VIEWER_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if sys.platform.startswith("win"):
+            import msvcrt
+            msvcrt.locking(_VIEWER_LOCK.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(_VIEWER_LOCK, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         print(f"another viewer is already running on {d} -- not starting a second one", flush=True)
         sys.exit(3)
@@ -1878,7 +1904,7 @@ def main():
     sess.stereo_only = a.stereo
     if a.mode == "v2":
         log(f"  eng wav: {'yes' if sess.eng.path else 'NO (silence)'}"
-            f"{' 5.1 -> AC-3' if (sess.eng_ch == 6 and not a.stereo) else ' stereo mp2'}   "
+            f"{' 5.1 -> AC-3' if (sess.eng_ch == 6 and not a.stereo) else (' stereo mp2 (ASPX_ACPL_3 core)' if getattr(sess, 'acpl_stereo', False) else ' stereo mp2')}   "
             f"spa wav: {'yes' if sess.spa.path else 'NO (silence)'}   "
             f"cc anchor: "
             f"{'exact' if sess.anchor_exact else 'first_seq fallback'}")

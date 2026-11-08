@@ -452,6 +452,12 @@ def main():
                     kids = []
                     last_frames, fade_since = None, None
                     continue
+                if died and replay and proc.returncode == 0:
+                    # 13.26: a replayed capture reaches its end; that is the
+                    # run finishing, not a chain to restart 30 times over the
+                    # same file (which also rolls every lane a generation).
+                    log("  replay finished (chain rc=0) -- done")
+                    break
                 if died:
                     log(f"  chain EXITED (rc={proc.returncode})")
                 elif time.time() - started < max(

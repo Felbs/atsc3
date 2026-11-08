@@ -79,19 +79,13 @@ EXPORT int32_t demap_kernel_abi(void) { return 2; }
  * Returns 0 on success, non-zero if the shape is outside the kernel's range
  * (the caller then falls back to the numpy path).
  */
-EXPORT int32_t demap_llr_f32(const float *zr, const float *zi,
-                             int32_t k, int32_t ncell,
-                             int32_t npts, int32_t nb,
-                             const float *pfx, const float *pfy,
-                             const float *p2f,
-                             float *out, float *d2)
+static int32_t demap_scalar(const float *zr, const float *zi,
+                            int32_t k, int32_t ncell,
+                            int32_t npts, int32_t nb,
+                            const float *pfx, const float *pfy,
+                            const float *p2f,
+                            float *out, float *d2)
 {
-    if (npts <= 0 || npts > DK_MAX_PTS || nb <= 0 || nb > DK_MAX_BITS)
-        return 1;
-    if ((int32_t)1 << nb != npts)
-        return 2;
-    if (k <= 0 || ncell <= 0)
-        return 0;
 
     /* Which subset each point belongs to, per label bit.  Hoisted out of the
      * cell loop: it depends only on the constellation, and recomputing the
@@ -131,6 +125,101 @@ EXPORT int32_t demap_llr_f32(const float *zr, const float *zi,
     return 0;
 }
 
+/* E106 (2026-11-07): the same sweep, eight constellation points per AVX2
+ * vector, branch-free.  Per lane the arithmetic is the scalar path's, in the
+ * scalar path's association (two multiplies, two adds, never contracted:
+ * the build pins -ffp-contract=off and these are explicit mul/add
+ * intrinsics), and a minimum is the same number whatever order it is taken
+ * in -- so the output is BIT-IDENTICAL to demap_scalar, which
+ * gate_e102_demap.py re-asserts against the numpy path.  Label bit i of
+ * point j is (j >> (nb-1-i)) & 1: for the top bits that is a property of
+ * the whole 8-point vector (j0 >> s), for the bottom three it is a fixed
+ * lane pattern inside every vector.  Chosen at run time by
+ * __builtin_cpu_supports, so one build of this file runs anywhere. */
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+__attribute__((target("avx2")))
+static int32_t demap_avx2(const float *zr, const float *zi,
+                          int32_t k, int32_t ncell,
+                          int32_t npts, int32_t nb,
+                          const float *pfx, const float *pfy,
+                          const float *p2f,
+                          float *out, float *d2)
+{
+    const __m256 inf = _mm256_set1_ps(3.402823466e+38f);
+    const int32_t nv = npts / 8;
+    const size_t ncells = (size_t)k * (size_t)ncell;
+    for (size_t c = 0; c < ncells; ++c) {
+        const float x = zr[c], y = zi[c];
+        const __m256 xv = _mm256_set1_ps(x), yv = _mm256_set1_ps(y);
+        __m256 amin[DK_MAX_BITS], bmin[DK_MAX_BITS], qmin = inf;
+        for (int32_t i = 0; i < nb; ++i) { amin[i] = inf; bmin[i] = inf; }
+        /* The three LOW label bits of point j depend only on j mod 8 -- the
+         * lane -- so their subset minima are lane subsets of ONE lane-wise
+         * minimum over all vectors (qmin), taken once per cell.  Only the
+         * nb-3 HIGH bits, which depend on the vector index, cost a minimum
+         * per vector.  (MEASURED: 270 -> ~120 ms a Frame single-threaded.) */
+        const int32_t ntop = nb - 3;
+        for (int32_t v = 0; v < nv; ++v) {
+            const int32_t j0 = v * 8;
+            const __m256 q = _mm256_add_ps(
+                _mm256_add_ps(_mm256_mul_ps(xv, _mm256_loadu_ps(pfx + j0)),
+                              _mm256_mul_ps(yv, _mm256_loadu_ps(pfy + j0))),
+                _mm256_loadu_ps(p2f + j0));
+            qmin = _mm256_min_ps(qmin, q);
+            for (int32_t i = 0; i < ntop; ++i) {
+                if ((v >> (ntop - 1 - i)) & 1) amin[i] = _mm256_min_ps(amin[i], q);
+                else                           bmin[i] = _mm256_min_ps(bmin[i], q);
+            }
+        }
+        float t[8];
+        _mm256_storeu_ps(t, qmin);
+        float qm = t[0];
+        for (int l = 1; l < 8; ++l) if (t[l] < qm) qm = t[l];
+        d2[c] = x * x + y * y + qm;
+        float *o = out + c * (size_t)nb;
+        for (int32_t i = 0; i < ntop; ++i) {
+            float a, b, u[8];
+            _mm256_storeu_ps(u, amin[i]);
+            a = u[0]; for (int l = 1; l < 8; ++l) if (u[l] < a) a = u[l];
+            _mm256_storeu_ps(u, bmin[i]);
+            b = u[0]; for (int l = 1; l < 8; ++l) if (u[l] < b) b = u[l];
+            o[i] = a - b;
+        }
+        for (int32_t i = ntop; i < nb; ++i) {
+            const int32_t sh = nb - 1 - i;          /* 2, 1, 0 */
+            float a = 3.402823466e+38f, b = 3.402823466e+38f;
+            for (int l = 0; l < 8; ++l) {
+                if ((l >> sh) & 1) { if (t[l] < a) a = t[l]; }
+                else               { if (t[l] < b) b = t[l]; }
+            }
+            o[i] = a - b;
+        }
+    }
+    return 0;
+}
+#endif
+
+EXPORT int32_t demap_llr_f32(const float *zr, const float *zi,
+                             int32_t k, int32_t ncell,
+                             int32_t npts, int32_t nb,
+                             const float *pfx, const float *pfy,
+                             const float *p2f,
+                             float *out, float *d2)
+{
+    if (npts <= 0 || npts > DK_MAX_PTS || nb <= 0 || nb > DK_MAX_BITS)
+        return 1;
+    if ((int32_t)1 << nb != npts)
+        return 2;
+    if (k <= 0 || ncell <= 0)
+        return 0;
+#if defined(__x86_64__) || defined(__i386__)
+    if (npts >= 8 && (npts % 8) == 0 && nb >= 3 && __builtin_cpu_supports("avx2"))
+        return demap_avx2(zr, zi, k, ncell, npts, nb, pfx, pfy, p2f, out, d2);
+#endif
+    return demap_scalar(zr, zi, k, ncell, npts, nb, pfx, pfy, p2f, out, d2);
+}
+
 /* E105: nearest constellation point per cell, for the common-phase-error
  * correction (m9_fast._cpe_fast).
  *
@@ -150,12 +239,56 @@ EXPORT int32_t demap_llr_f32(const float *zr, const float *zi,
  * notes that "a flip needs two points equidistant to within a rounding" --
  * so the rule has to MATCH, not merely be reasonable.
  */
+#if defined(__x86_64__) || defined(__i386__)
+/* E106: eight points per vector.  Lane l tracks the first strict minimum
+ * among the points j = l mod 8 in ascending j (the vectors ascend); across
+ * lanes, the smallest INDEX among the lanes holding the global minimum is
+ * the first minimum in j order -- np.argmin's rule, exactly. */
+__attribute__((target("avx2")))
+static int32_t cpe_nearest_avx2(const float *zr, const float *zi, int32_t n,
+                                const float *pfx, const float *pfy,
+                                const float *p2f, int32_t npts, int32_t *idx)
+{
+    const int32_t nv = npts / 8;
+    const __m256i lane = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
+    for (int32_t c = 0; c < n; ++c) {
+        const __m256 xv = _mm256_set1_ps(zr[c]), yv = _mm256_set1_ps(zi[c]);
+        __m256 best = _mm256_set1_ps(3.402823466e+38f);
+        __m256i arg = _mm256_setzero_si256();
+        for (int32_t v = 0; v < nv; ++v) {
+            const int32_t j0 = v * 8;
+            const __m256 sc = _mm256_add_ps(
+                _mm256_add_ps(_mm256_mul_ps(xv, _mm256_loadu_ps(pfx + j0)),
+                              _mm256_mul_ps(yv, _mm256_loadu_ps(pfy + j0))),
+                _mm256_loadu_ps(p2f + j0));
+            const __m256 lt = _mm256_cmp_ps(sc, best, _CMP_LT_OQ);
+            best = _mm256_blendv_ps(best, sc, lt);
+            arg = _mm256_blendv_epi8(arg, _mm256_add_epi32(_mm256_set1_epi32(j0), lane),
+                                     _mm256_castps_si256(lt));
+        }
+        float b[8]; int32_t a[8];
+        _mm256_storeu_ps(b, best);
+        _mm256_storeu_si256((__m256i *)a, arg);
+        float gmin = b[0];
+        for (int l = 1; l < 8; ++l) if (b[l] < gmin) gmin = b[l];
+        int32_t win = 0x7fffffff;
+        for (int l = 0; l < 8; ++l) if (b[l] == gmin && a[l] < win) win = a[l];
+        idx[c] = win;
+    }
+    return 0;
+}
+#endif
+
 EXPORT int32_t cpe_nearest_f32(const float *zr, const float *zi, int32_t n,
                                const float *pfx, const float *pfy,
                                const float *p2f, int32_t npts,
                                int32_t *idx)
 {
     if (npts <= 0 || npts > DK_MAX_PTS || n < 0) return 1;
+#if defined(__x86_64__) || defined(__i386__)
+    if (npts >= 8 && (npts % 8) == 0 && __builtin_cpu_supports("avx2"))
+        return cpe_nearest_avx2(zr, zi, n, pfx, pfy, p2f, npts, idx);
+#endif
     for (int32_t c = 0; c < n; ++c) {
         const float x = zr[c], y = zi[c];
         float best = x * pfx[0] + y * pfy[0] + p2f[0];

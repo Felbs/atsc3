@@ -1,0 +1,563 @@
+{
+  "capture": "hit_rf33.cs16",
+  "geometry": {
+    "mode": 3,
+    "kind": "L1-Detail-3",
+    "Ksig": 512,
+    "Nouter": 680,
+    "Kldpc": 6480,
+    "Ninner": 16200,
+    "Nldpc_parity": 9720,
+    "eta": 2,
+    "Nfec": 1760,
+    "Npunc": 8640,
+    "n_parity_kept": 1080,
+    "cells": 880,
+    "rate": "6/15"
+  },
+  "l1_basic": {
+    "L1B_version": 0,
+    "L1B_mimo_scattered_pilot_encoding": 0,
+    "L1B_lls_flag": 1,
+    "L1B_time_info_flag": 3,
+    "L1B_return_channel_flag": 0,
+    "L1B_papr_reduction": 0,
+    "L1B_frame_length_mode": 1,
+    "L1B_time_offset": 61824,
+    "L1B_additional_samples": 0,
+    "L1B_num_subframes": 1,
+    "L1B_preamble_num_symbols": 0,
+    "L1B_preamble_reduced_carriers": 0,
+    "L1B_L1_Detail_content_tag": 0,
+    "L1B_L1_Detail_size_bytes": 64,
+    "L1B_L1_Detail_fec_type": 2,
+    "L1B_L1_Detail_additional_parity_mode": 0,
+    "L1B_L1_Detail_total_cells": 880,
+    "L1B_first_sub_mimo": 0,
+    "L1B_first_sub_miso": 0,
+    "L1B_first_sub_fft_size": 0,
+    "L1B_first_sub_reduced_carriers": 0,
+    "L1B_first_sub_guard_interval": 6,
+    "L1B_first_sub_num_ofdm_symbols": 34,
+    "L1B_first_sub_scattered_pilot_pattern": 2,
+    "L1B_first_sub_scattered_pilot_boost": 1,
+    "L1B_first_sub_sbs_first": 1,
+    "L1B_first_sub_sbs_last": 1,
+    "L1B_first_sub_mimo_mixed": 1,
+    "L1B_reserved": 140737488355327,
+    "L1B_crc": 298109420
+  },
+  "frames": [
+    {
+      "t": 0.0,
+      "converged": true,
+      "iters": 5,
+      "unsatisfied": 0,
+      "bch_ok": true
+    },
+    {
+      "t": 0.7,
+      "converged": true,
+      "iters": 5,
+      "unsatisfied": 0,
+      "bch_ok": true
+    },
+    {
+      "t": 1.4,
+      "converged": true,
+      "iters": 5,
+      "unsatisfied": 0,
+      "bch_ok": true
+    }
+  ],
+  "controls": [
+    {
+      "name": "cells shifted +40",
+      "converged": false,
+      "unsatisfied": 270,
+      "bch_ok": false
+    },
+    {
+      "name": "cells shifted -40",
+      "converged": false,
+      "unsatisfied": 261,
+      "bch_ok": false
+    },
+    {
+      "name": "L1-Basic's own cells",
+      "converged": false,
+      "unsatisfied": 872,
+      "bch_ok": false
+    },
+    {
+      "name": "tail of the symbol",
+      "converged": false,
+      "unsatisfied": 418,
+      "bch_ok": false
+    },
+    {
+      "name": "wrong shortening pattern (L1-Detail-4)",
+      "converged": false,
+      "unsatisfied": 867,
+      "bch_ok": true
+    },
+    {
+      "name": "wrong group-wise pattern (L1-Detail-4)",
+      "converged": false,
+      "unsatisfied": 1727,
+      "bch_ok": true
+    },
+    {
+      "name": "group-wise permutation inverted",
+      "converged": false,
+      "unsatisfied": 566,
+      "bch_ok": true
+    }
+  ],
+  "cliff_profile": [
+    [
+      1150,
+      19.43387337241711
+    ],
+    [
+      1170,
+      19.07810560772024
+    ],
+    [
+      1190,
+      19.294138186035422
+    ],
+    [
+      1210,
+      19.631607308307288
+    ],
+    [
+      1230,
+      19.69729559409291
+    ],
+    [
+      1250,
+      18.995391060223795
+    ],
+    [
+      1270,
+      18.692312572985575
+    ],
+    [
+      1290,
+      18.86698911266289
+    ],
+    [
+      1310,
+      12.86601776204882
+    ],
+    [
+      1330,
+      8.135689070189141
+    ],
+    [
+      1350,
+      5.707722966971414
+    ],
+    [
+      1370,
+      4.621697828667751
+    ],
+    [
+      1390,
+      4.48802447505624
+    ],
+    [
+      1410,
+      4.370454870047269
+    ],
+    [
+      1430,
+      4.424577885248099
+    ],
+    [
+      1450,
+      4.742496498131311
+    ],
+    [
+      1470,
+      5.033864452451018
+    ]
+  ],
+  "mimo_mixed": 1,
+  "l1_detail": [
+    {
+      "path": "",
+      "name": "L1D_version",
+      "value": 1
+    },
+    {
+      "path": "",
+      "name": "L1D_num_rf",
+      "value": 0
+    },
+    {
+      "path": "",
+      "name": "L1D_time_sec",
+      "value": 1787437866
+    },
+    {
+      "path": "",
+      "name": "L1D_time_msec",
+      "value": 840
+    },
+    {
+      "path": "",
+      "name": "L1D_time_usec",
+      "value": 163
+    },
+    {
+      "path": "",
+      "name": "L1D_time_nsec",
+      "value": 944
+    },
+    {
+      "path": "i=0/",
+      "name": "L1D_subframe_multiplex",
+      "value": 0
+    },
+    {
+      "path": "i=0/",
+      "name": "L1D_frequency_interleaver",
+      "value": 1
+    },
+    {
+      "path": "i=0/",
+      "name": "L1D_sbs_null_cells",
+      "value": 127
+    },
+    {
+      "path": "i=0/",
+      "name": "L1D_num_plp",
+      "value": 1
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_id",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_lls_flag",
+      "value": 1
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_layer",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_start",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_size",
+      "value": 199800
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_scrambler_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_fec_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_mod",
+      "value": 2
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_cod",
+      "value": 9
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_TI_mode",
+      "value": 2
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_HTI_inter_subframe",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_HTI_num_ti_blocks",
+      "value": 1
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_HTI_num_fec_blocks_max",
+      "value": 73
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_HTI_num_fec_blocks",
+      "value": 73
+    },
+    {
+      "path": "i=0/j=0/",
+      "name": "L1D_plp_HTI_cell_interleaver",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_id",
+      "value": 16
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_lls_flag",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_layer",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_start",
+      "value": 199800
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_size",
+      "value": 8100
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_scrambler_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_fec_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_mod",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_cod",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_TI_mode",
+      "value": 2
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_type",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_TI_extended_interleaving",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_HTI_inter_subframe",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_HTI_num_ti_blocks",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_HTI_num_fec_blocks_max",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_HTI_num_fec_blocks",
+      "value": 0
+    },
+    {
+      "path": "i=0/j=1/",
+      "name": "L1D_plp_HTI_cell_interleaver",
+      "value": 0
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_mimo",
+      "value": 0
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_miso",
+      "value": 0
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_fft_size",
+      "value": 1
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_reduced_carriers",
+      "value": 0
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_guard_interval",
+      "value": 6
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_num_ofdm_symbols",
+      "value": 74
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_scattered_pilot_pattern",
+      "value": 3
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_scattered_pilot_boost",
+      "value": 1
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_sbs_first",
+      "value": 1
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_sbs_last",
+      "value": 1
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_subframe_multiplex",
+      "value": 0
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_frequency_interleaver",
+      "value": 1
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_sbs_null_cells",
+      "value": 1609
+    },
+    {
+      "path": "i=1/",
+      "name": "L1D_num_plp",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_id",
+      "value": 1
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_lls_flag",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_layer",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_start",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_size",
+      "value": 947700
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_scrambler_type",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_fec_type",
+      "value": 1
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_mod",
+      "value": 3
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_cod",
+      "value": 9
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_TI_mode",
+      "value": 2
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_type",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_HTI_inter_subframe",
+      "value": 0
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_HTI_num_ti_blocks",
+      "value": 2
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_HTI_num_fec_blocks_max",
+      "value": 116
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_HTI_num_fec_blocks",
+      "value": 116
+    },
+    {
+      "path": "i=1/j=0/",
+      "name": "L1D_plp_HTI_cell_interleaver",
+      "value": 0
+    },
+    {
+      "path": "",
+      "name": "L1D_bsid",
+      "value": 540
+    }
+  ],
+  "reserved_len": 7,
+  "reserved_all_ones": true,
+  "l1d_bits": "00010000110101010001010001000110010101011010010000010100011111011000001000000111111100000100000010000000000000000000000000000000011000011000111100000000000101001100000010000010010010000010010010010000000000000110000110001111000000000000001111110100100000000000000001000000000000000000000000000000000000010000110000010010100001100111010011001001001000000000001000000000000000000000000000000011100111010111110100000001001110011000001000000111010000000111010000000001000011100111111110111000100110101011010000101001"
+}

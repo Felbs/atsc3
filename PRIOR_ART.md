@@ -1171,3 +1171,1679 @@ precisely because it survives scrutiny from someone who works in broadcast.
 - https://github.com/awanga/usrp-atsc3 (assessed, §3.2)
 - https://github.com/johnb-7/hdhr-ac4 · https://github.com/ferrellsl/VideoPlayer
 - GNU Radio ATSC wiki (1.0 only) — https://wiki.gnuradio.org/index.php/ATSC
+
+---
+
+## 13. Addendum 2026-11-06 — OnAir, a second independent receiver
+
+Research date: **2026-11-06**. This section follows the §4 rule: **comparison oracle,
+not a source. Never paste.** OnAir is GPL-3.0 and this project is Apache-2.0, so the
+only things that cross over are ideas, written here from the principle and gated by our
+own referee. Credit is recorded in `NOTICE` ("Techniques learned from other projects").
+
+### 13.0 Provenance — what was ours before we had seen it
+
+**[FOUND — this repository's and Software-TV-Tuner's git history]**
+
+| Date | Milestone | Evidence |
+|---|---|---|
+| 2026-04-29 | The TV tuning journey begins: ATSC 1.0, a gr-atsc fork with five rewritten blocks | Software-TV-Tuner, initial commit |
+| 2026-05-01 | First broadcast decoded by our own chain ("HDHR-quality SDR decode", RF34) | Software-TV-Tuner, README milestone commit |
+| 2026-05-02/03 | First stable, unattended decoding: continuous playback, watchdogs, seamless recovery | Software-TV-Tuner commits of those days |
+| 2026-08-05 | ATSC 3.0 begins, alongside ATSC 1.0: bootstrap detector, signalling and L1-Basic decoded from real RF33 air the same day (M1–M3) | this repository, first commits |
+| 2026-08-22/23 | Live ATSC 3.0 television with 5.1 audio, on a Raspberry Pi 5 | this repository |
+| **2026-11-06** | **First idea taken from OnAir** (the delay-domain channel estimate, §13.3–13.4) | this section |
+
+OnAir is not mentioned anywhere in either history before 2026-11-06. Everything above
+that line was built independently, from the standards; everything from that line on
+says so where it applies.
+
+### 13.1 Census row
+
+| Project | What it actually does | Lang | License | Maintained | Covers our gaps? |
+|---|---|---|---|---|---|
+| [adswill/OnAir](https://github.com/adswill/OnAir) | Multi-mode SDR receiver with an **ATSC 3.0 receive chain built from the spec**: bootstrap, L1, every subframe (8K/16K/32K), CTI and HTI, LDPC 16200 and 64800 (a batched 8-bit layered min-sum), ALP, LLS/SLT, ROUTE/DASH to a TS player. No MMTP, no AC-4. Its README says its ATSC 3.0 was tested only on simulated signals. | C++ | GPL-3.0 | Yes — 2026-11 | **Subframe 1 / PLP 1 live: YES.** Delay-domain channel estimate: YES. MMTP: no. |
+
+### 13.2 Head to head, same 20 s of RF33 air, same PC (2026-11-06)
+
+**[FOUND — measured]** Recording `~/captures/race_2026-11-06/live_rf33_antB.cs16`
+(Antenna B, bias-T, rfgain_sel 4, IFGR 32, 6.912 Msps, no overflows).
+
+| | ours (`python -m atsc3 watch --capture`) | OnAir (`atsc3rx`, 12 threads) |
+|---|---|---|
+| wall time for 20 s of air | 10.8 s | 18.0 s |
+| PLP 0 FEC blocks | 5994/5994 | 5920/5920 |
+| PLP 1 FEC blocks | not decoded live (m13 offline: 819/819 on the frames checked) | 9046/9360 — all 314 failures in two bursts (frames 20-21, 28-30) while power, flutter and PLP 0 were steady: a receiver fault, not the air |
+| service played | WJLA 7.1 (MMTP), 2 audio tracks, captions | WHUT 32.1 (ROUTE), 1080p60, no audio (no AC-4) |
+
+### 13.3 What is worth learning from it, in order
+
+1. **Channel estimation in the delay domain** (their `atsc3_ofdm.cpp`, a standard
+   DFT-based estimate). Ours interpolates linearly between pilots. Re-implemented as
+   `lab/e104_combce.py`; see §13.4 for the gate.
+2. **Every subframe decoded live.** Our live path is subframe 0 only; m13 proves PLP 1
+   offline. The port is wiring (m13 + m16 demapper + the staged E47 ROUTE lanes). Found
+   on the way: `m16_margin.smoothed_pool_g` (E60, lab copy) does NOT work on subframe 1
+   (0/234 blocks on clean air at W=12); the live copy in `m9_fast` derotates per symbol
+   and the lab copy does not. The port must use the live copy.
+3. **Batched 8-bit layered LDPC**, 16 blocks per vector. A speed lever that only pays on
+   weak signals where blocks run many iterations; our kernel retires clean blocks on the
+   syndrome check with no work, so on clean air there is nothing to gain.
+
+Not worth learning: their PLP 1 tracking (the bursts above), and they have no MMTP or AC-4.
+
+### 13.4 E104 gate — delay-domain estimate vs linear interpolation
+
+Protocol (E58's, adapted to real air): seeded complex Gaussian noise added to the IQ of
+`hit_rf33.cs16` at stated levels below the recorded power, subframe 1 / PLP 1 (256QAM
+11/15, 117 blocks per frame, 2 frames), decoded twice on the per-symbol path with the SAME
+noise — linear interpolation (control) and the comb estimate — judged by LDPC convergence
+and BCH syndrome zero. Self-check legs: flat channel exact; two-path channel 8.5-11 dB
+more accurate than linear at 10/20/30 dB pilot SNR; pure noise refused; a comb too
+sparse for the guard refused.
+
+| added noise, dB below signal | linear | comb |
+|---|---|---|
+| none / 24 | 234/234 | 234/234 |
+| 23.5 | 233/234 | 234/234 |
+| 23.0 | 198/234 | 234/234 |
+| 22.5 | 161/234 | 234/234 |
+| 22.0 | 31/234 | **234/234** |
+| 21.5 | 0/234 | **198/234** |
+| 21.0 | 0/234 | **108/234** |
+| 20 and below | 0/234 | 0/234 |
+
+Result: linear interpolation holds 95% of the blocks down to 23.5 dB, the comb estimate
+holds 100% down to 22.0 dB: **+1.5 dB of margin** on this signal (the 50%-of-blocks
+point moves by about the same). Raw rows: `lab/e104_out/`. Caveat: the
+"added noise" axis is relative to the recorded power, which already includes the
+recording's own noise, so only the DIFFERENCE between the columns is a measurement.
+### 13.5 Into the live chain — what broke first, and the fix (2026-11-06, evening)
+
+Wired as `MarginCfg.ce_comb` (env `ATSC3_CE_COMB`, OFF by default): on the E60
+time-smoothed grid the accepted symbols get a full-resolution delay-domain row, which the
+C equaliser kernel reads through an identity grid map (every carrier its own grid point),
+so `cellpool_kernel.c` is untouched. `ATSC3_CE_COMB_LOG=1` reports how many symbols the
+estimator accepted; `ATSC3_SNR_LOG=1` prints the dummy-cell SNR of every frame.
+
+**First result: it LOST.** 18 dB of added noise, PLP 0, 32 frames: 494/2368 blocks with
+the estimate on against 1259/2368 off, every symbol accepted (35/35). The estimator was
+right and the integration was right; the recipe was wrong for this regime.
+
+**Diagnosis (synthetic grid, spacing 4, measured):** the standard recipe's cap of "never
+keep a tap more than 40 dB under the strongest" leaves a bias floor near −31 dB, because
+the band-edge bridge leaks a little energy into sidelobe skirts around every real tap and
+the cap throws the skirts away. On the per-symbol path the pilot noise is far above that
+floor and the gate showed +1.5 dB; on the smoothed grid the noise is already BELOW it on
+a mild channel (linear interpolation reaches −41 dB at a 40 dB grid), so the estimate
+replaced a small error with a larger one. Two changes remove the floor: (1) rotate the
+grid so the main path sits at zero delay before bridging (the edges then match), and
+(2) cap at 60 dB and keep 8 bins of skirt either side of every kept tap, the refusals
+still judged on the taps that cleared the floor on their own. After that the estimate is
+better than or equal to linear interpolation in every synthetic case tried (3–7 dB on a
+mild channel at a 40 dB grid, 17–23 dB with a strong echo) — and the live chain at 18 dB
+turned round to 1471/2368 against 1228/2368.
+
+**A referee lesson.** Block counts at the cliff are NOT a stable referee for the live
+chain: a re-acquisition ("8 frames under 60/74") throws away seconds, so identical input
+gave 1471 and 805 blocks on two runs. The live gate therefore reads the per-frame
+dummy-cell SNR at a level where both settings decode fully (the estimate's effect on the
+equalised cells, free of acquisition luck), plus repeated runs at the cliff for the
+trend. Results:
+
+**Live chain, dummy-cell SNR per frame (32 frames each, same frames, PLP 0 on the
+E60 smoothed grid, `ATSC3_SNR_LOG=1`):**
+
+| recording | estimate off | estimate on | gain |
+|---|---|---|---|
+| 20 dB added noise | 16.13 dB (min 14.58) | 16.23 dB (min 14.66) | **+0.10 dB** |
+| 19 dB added noise | 15.55 dB (min 14.20) | 15.69 dB (min 14.30) | **+0.14 dB** |
+| as recorded | 15.75 dB (min 13.79) | 15.90 dB (min 13.94) | **+0.15 dB** |
+
+Cell-pool stage: 20.4 ms/frame off, 55.6 ms/frame on (of a 247 ms budget).
+
+**Cliff repeats** (blocks of 2368, PLP 0): 17 dB — off 1813/1686/1686, on 2131/1663/1663;
+18 dB — off 1259/803/1469, on 805/805/297 (re-acquisitions 1–3 in every run). Identical
+run to run where nothing re-acquired; otherwise acquisition luck, as said above.
+
+**Verdict.** On subframe 0 the E60 time smoothing has already taken most of the pilot
+noise, and the delay-domain estimate adds only **+0.1 to +0.15 dB** on top of it,
+consistently, for about +35 ms a frame. `ce_comb` therefore STAYS OFF by default
+there. Its real value in this chain is the **per-symbol path**, where the gate measured
+**+1.5 dB** (§13.4): the fallback symbols the change detector sends that way, and all of
+**subframe 1 / PLP 1**, which has no working time smoothing yet (§13.3 item 2). The PLP 1
+live port should take this estimator as its channel estimate from the start.
+
+Not yet done: RF25 (SP12_4, where a single symbol's comb is too sparse and the estimate
+must sit on the smoothed grid), and a live A/B on air.
+
+### 13.6 M17 — Subframe 1 / PLP 1 decoded live (2026-11-07, 00:25–00:58)
+
+What OnAir does that we did not: decode every Subframe live. Done as `lab/m17_plp1_live.py`
+(`SubframeDecoder`: m13's geometry and HTI reading, the live decoder's threaded CPE / demap /
+LDPC-ladder / BCH batches, the E104 estimate as its channel estimate) plus `--plp1` in
+`m11_watch` (whole-Frame window and 26 MB shared slots, the second decoder in both decode
+paths, PLP 1's own Baseband stream tagged for the transport) and one ALP walker per PLP in
+`m11_stream.Transport`. The staged E47 ROUTE lanes then light up unchanged.
+
+**Gates.**
+1. Byte identity: `python lab/m17_plp1_live.py hit_rf33.cs16 --frames 2` — the Baseband
+   stream equals m13's offline stream byte for byte, estimator off and on (1.1 s a Frame
+   against m13's 13 s).
+2. Offline over the whole race capture (`--frames 81 --no-ref`): 117/117 on every Frame,
+   both estimators.
+3. Live (`watch --capture live_rf33_antB.cs16 --plp1 --route 239.255.32.1:8321 --assets all`):
+   see the table.
+
+**What broke, and the finding.** The first live run lost PLP 1 from Frame ~50 to the end:
+linear interpolation fell to 0/117 for the last 27 Frames, the E104 estimate held 30–116.
+PLP 0 never dropped a block. Offline the same Frames were 117/117. Cause: the front end
+fixes the carrier offset once per lock (`m11_stream`, "the CFO is FIXED for the whole
+lock"), and the tuner drifted +471 → +452 Hz over the 20 s. 19 Hz is 4.5% of a 16K carrier
+spacing — inter-carrier interference near −22 dB, fatal for 256QAM — and 2.2% of an 8K
+spacing, which 64QAM never notices. Fix (M17 only; PLP 0's path and its byte gates are
+untouched): the residual is measured on the Subframe's own pilots as the common phase step
+between same-parity symbols, the Subframe's samples are rotated by it before the FFT, and
+`cfo_resid_hz` is reported per Frame. The same drift costs PLP 0 margin silently
+(−28 dB ICI floor); tracking it in the front end is a separate, gated change.
+
+| live on the race capture, 80 Frames | PLP 1 blocks | PLP 0 blocks | WHUT video lane |
+|---|---|---|---|
+| linear estimate, CFO fixed at lock | 5920/9009 (0/117 from Frame 55 on) | 100% | — |
+| E104 estimate, CFO fixed at lock | 8230/8892 | 100% | 12 s |
+| **E104 estimate + residual CFO tracked** | **9360/9360** | **5920/5920** | **18 s, 1080 frames, no gap** |
+| OnAir on the same air (§13.2) | 9046/9360, two bursts | 5920/5920 | 4 s hole |
+
+Speed, this box, lossless replay: ~1.1 s a Frame for Subframe 1 (demap 570 ms, LDPC
+200–400 ms, pool+CPE ~200 ms) against the 247 ms Frame. Live air needs a compiled demapper
+(the `cellpool_kernel.c` pattern) and a third decode process; the m16 numpy demapper is
+slower still here (140 ms a Block). Instruments: `ATSC3_PLP1_LOG=1` (per-Frame PLP 1
+blocks), `ATSC3_WIN_LOG=1` (window sizes handed to the workers).
+
+### 13.7 The speed pass — E106 (demapper) and E107 (layered LDPC), 2026-11-07 01:00–02:00
+
+Subframe 1 cost ~1.1 s a Frame against the 247 ms budget; two stages were the bulk of it.
+
+**E106 — the demapper, vectorised.** `demap_kernel.c` (E102) was scalar C, built without
+`-march`, with a branchy inner loop the compiler could not vectorise. Added an AVX2 path in the
+same file (eight constellation points per vector, branch-free subset minima, chosen at run
+time by `__builtin_cpu_supports`, the scalar path kept as the fallback). Per lane it is the
+scalar path's arithmetic in the scalar path's association, and a minimum is the same number
+whatever order it is taken in, so the output is bit-identical: `gate_e102_demap.py` passes
+unchanged and M17 still equals m13 byte for byte. **570 ms → 66 ms a Frame** on PLP 1; the
+same kernel serves PLP 0. (Our m16 numpy GEMM demapper was 4x slower than E102 on this box —
+140 ms a Block — because numpy's strided minima do not behave here as they did where it was
+measured; it stays as the exact reference it always was.)
+
+**E107 — the layered, eight-lane LDPC kernel** (OnAir's idea; §13.3 item 3). A new kernel,
+`ldpc_layered_kernel.c`, beside the flooding one: the same normalised min-sum rule, alpha and
+first-minimum tie rule, the syndrome checked before the first update, but each check's
+messages enter the totals at once (layered), and eight codewords ride the eight lanes of one
+AVX2 vector. Python dispatch `m3_ldpc.layered_decode_batch`, hooked into `m9_fast._ldpc_cpu`
+for the cpu_fast path only (`ATSC3_LDPC_LAYERED=0` restores flooding; the exact float64 path
+never routes through it). Gate `gate_e107_ldpc.py`, E54's boundary on real air with seeded
+noise, both codes (PLP 0 16200-bit through the live decoder, PLP 1 64800-bit through M17),
+six noise levels, two Frames:
+
+| | result |
+|---|---|
+| blocks converged under flooding but not layered | **0** |
+| blocks converged under layered but not flooding | **28** (all at 21 dB: 73→96 and 109→114 of 117) |
+| Baseband byte mismatches on shared blocks | 0 |
+| non-deterministic blocks | 0 |
+| mean iterations, PLP 1 (clean / 23 / 22 / 21.5 dB) | 3.5 / 11 / 17 / 24 → 2.2 / 6 / 10 / 12 |
+| LDPC time over the gate | 22.5 s → 12.1 s (1.9x); clean-air PLP 1 134–381 → 74–79 ms |
+
+So it is faster AND converges more at the cliff; on by default for cpu_fast.
+
+*Amended 08:40, after the gate was made to reset the M17 decoder's per-Frame state between
+its three decodes (the fed-forward carrier offset and the cached delay had made the "same
+input" slightly different each time, which showed up as one "non-deterministic" block):*
+with identical inputs the kernel is deterministic, and the strict count at the cliff is
+**17 gained, 1 lost** on one Frame at 21 dB (92 vs 76 of 117), 5 gained on the other, 15 and
+29 gained at 20.5 dB where flooding has 0. A change of schedule converges a slightly
+different set near the threshold; a strict superset is not a law, and the gate's rule is now
+net gain at every level (plus byte identity on shared blocks and determinism). The claim
+"never loses a block" above is withdrawn in favour of "+16 to +29 a Frame at the cliff, one
+block in ~900 the other way".
+
+**Two more trims in M17 (07:00–07:15).** The residual carrier offset is fed FORWARD: last
+Frame's value rotates the samples before the first transform, and the second transform runs
+only when the residual measured afterwards is still over a hertz (a jump), so in steady drift
+the pool pays one FFT pass, not two (the gate's second Frame: −5.83 Hz inherited, −0.44 Hz
+left). The comb estimate runs in four batched transforms (symbols grouped by pilot parity)
+instead of seventy-five, and `comb_denoise_grid` rotates by one vector per distinct
+main-path delay instead of one per symbol (the per-symbol exponentials were ~100 ms a Frame
+at 16K). M17 still equals m13 byte for byte. Standalone PLP 1 Frame now ≈ 490 ms (pool
+166–188 with the comb / 95–122 without, CPE 90, demap 66, LDPC 80, BCH 66).
+
+**Where the Frame stands after both:** PLP 1 ≈ 520–590 ms (pool 190 with the comb estimate and
+the CFO second transform, CPE 90, demap 66, LDPC 75–150, BCH 68, rest ~35) plus PLP 0 ≈ 130 ms,
+per decode process. Three processes put the effective Frame time at the budget on this 12-core
+box; the real-time replay numbers are below. The next fat, if needed: the BCH syndrome (68 ms
+for 117 x 64800 bits) and the pool's second FFT pass.
+
+### 13.8 The three-way race (2026-11-07, 07:45) — `lab/race3.py`, `lab/e104_out/race3/`
+
+Same 20 s of RF33 air (`~/captures/race_2026-11-06/live_rf33_antB.cs16`), same 12-core PC,
+one lane after another, nothing else running.
+
+| lane | what | wall for 20 s of air (lossless) | PLP 0 blocks | PLP 1 blocks | WHUT 32.1 video | WJLA 7.1 video |
+|---|---|---|---|---|---|---|
+| A | OnAir `atsc3rx`, 12 threads | 18.1 s | 5920/5920 | 9046/9360 | 720 frames, 16 s, **1 gap** | none (no MMTP) |
+| B | ours, before 2026-11-06 (worktree at HEAD, original scalar kernels) | **9.8 s** | 5994/5994 | not decoded | none | 1080 frames, 18 s, 0 gaps |
+| C | ours with their ideas (E104 + M17 + E107, plus E106) | 37.1 s | 5920/5920 | **9360/9360** | **1080 frames, 18 s, 0 gaps** | 1080 frames, 18 s, 0 gaps |
+| D | C with the switchable ideas off (`--no-plp1-comb`, flooding LDPC) | 40.7 s | 5920/5920 | 9360/9360 | 1080 frames, 0 gaps | 1080 frames, 0 gaps |
+
+(B decodes 81 Frames and C/D 80: C/D's whole-Frame window costs the last partial Frame of
+the file. B's 5994 vs 5920 is that extra Frame.)
+
+**Real-time headroom** (`--realtime --shed`): B, 3 processes: 1.19x, 77 of 81 Frames, WJLA
+945 frames with one gap. C, 3 processes x 16 threads (the harness default, which thrashes):
+0.77x, 42 Frames, no ROUTE lane written. C, 4 processes x 3 threads (`C_rt_4x3`): 0.91x, 47 of
+81 Frames, WHUT 480 frames (8 s, no gap) and WJLA 480 frames (18 s, one gap). Under shedding
+a ROUTE lane keeps only the DASH segments whose every Frame arrived (a segment is a whole
+object), so PLP 1 on live air wants the full budget; PLP 0's MMTP lane degrades more
+gracefully.
+
+**PLP 1 cliff, seeded noise, two Frames** (blocks of 234; idea 1 = E104 estimate, idea 3 =
+E107 layered LDPC; M17 live decoder throughout):
+
+| noise below signal | both on | E104 only | E107 only | both off |
+|---|---|---|---|---|
+| 23 dB | 234 | 234 | 234 | 234 |
+| 22 dB | 234 | 234 | 234 | 234 |
+| 21.5 dB | **234** | 234 | 145 | 78 |
+| 21 dB | **225** | 219 | 0 | 0 |
+| 20.5 dB | **28** | 1 | 0 | 0 |
+
+Read: the E104 estimate is worth about a dB at the cliff on this signal (0 → 219–225 blocks at
+21 dB); the layered LDPC adds a few tenths on top (219 → 225 at 21 dB, 1 → 28 at 20.5) and
+halves the decode time. Idea 2 (PLP 1 live) has no "off": without it the WHUT column is empty,
+as lane B shows.
+
+**Verdict.** Against OnAir on the same air: more blocks (9360 vs 9046), the whole programme
+without a hole (1080 vs 720 frames), with sound (AC-4) and the MMTP station beside it — but
+2x their wall time for the two PLPs on this box, and not yet real time with both PLPs
+(0.90x; PLP 0 alone 1.19x). Against ourselves: the ideas cost wall time (two PLPs instead of
+one) and bought a new station, a dB of margin and a faster LDPC.
+
+### 13.9 Real time with both PLPs — E108 and the replay clock (2026-11-07, 07:50–08:30)
+
+Asked first: is our code slower now with their ideas? Like for like (today's tree, `--plp1`
+off, the job lane B did): **8.7 s lossless (4.4x) against B's 9.8 s (3.7x); real time 1.22x,
+79 Frames, against B's 1.19x, 77.** About 12% faster on the same work. The race's 37 s was
+the second PLP, four times the bits.
+
+Then the budget. Single-thread CPU per Subframe 1 Frame after E106/E107 was ~0.6 s, so the
+box had the capacity twice over; what did not scale was the Python inside each decode
+process. Four changes, each gated (M17 == m13 byte for byte after every one):
+
+* **E108a — the equaliser rows in C.** Each comb symbol's divide-and-scatter goes through
+  `cellpool_row_sm_f64` with an identity grid map (the E104 trick in `m9_fast`); the kernel's
+  division mirrors numpy's bit for bit. Linear-fallback symbols keep the Python path.
+* **E108b — the BCH syndrome in C** (`bch_kernel.c`, `build_bch_kernel.py`, hooked in
+  `m9_accel.bch_syndrome_batch`, `ATSC3_BCH_KERNEL=0` restores numpy): the same popcounts
+  over the same masks, integer arithmetic, equal by construction and asserted. Raw call 11 ms
+  against numpy's 59 on 117 x 64800 bits — once compiled for the POPCNT instruction; the
+  generic builtin was SLOWER than numpy (244 ms), a lesson for every kernel here.
+* **E108c — the comb estimate's first transform cached.** Its first pass only finds the main
+  path's delay, which is static; `comb_denoise_grid(tau0=...)` takes last Frame's and checks
+  it (a stale hint, strongest tap away from zero, is measured afresh). The four pilot groups
+  run on the thread pool. Comb 85 → 33 ms.
+* **E108d — `SubframeDecoder.prewarm()`** in both decode paths: one silent Frame builds the
+  64800-bit BCH masks, the LDPC edge tables and the FFT plans before "ready" (3 s a worker).
+
+Subframe 1 standalone: ~1.1 s a Frame at first light → **~360 ms** (pool 120, CPE 71, LDPC 80,
+BCH 34, demap 27, rest ~30).
+
+**The replay clock.** The first real-time runs decoded 48 of 81 Frames at a reported 1.0x
+with 32 "dropped"; prewarming made it 23 of 81. Not throughput: when the chain sniffs the
+multiplex it starts the replay source's real-time clock INSIDE the sniff, before the decode
+pool warms, and the reader never re-anchored it — so the warm-up's worth of air arrived as a
+back-dated burst that the queues shed. `FileSource.rebase()` re-anchors the pacing when the
+reader takes over (pacing only; the sample stream is unchanged). Lane B's 77 of 81 in §13.8
+was the same artefact.
+
+| real-time replay, 4 processes x 3 threads, shedding allowed | Frames | dropped | PLP 0 | PLP 1 | WHUT | WJLA |
+|---|---|---|---|---|---|---|
+| before the clock fix, no prewarm | 48/81 | 32 | 100% | 100% | — | — |
+| **final** | **80/81** | **0** | 5920/5920 | 9360/9360 | 1080 frames, no gap | 1080 frames, no gap |
+
+Instantaneous rate 1.11–1.34x on this 12-core box with nothing else running. Both PLPs of RF33
+are decodable live. Not yet tried: live air with the radio (the next session's first run).
+
+**Final gates over this state (08:35):** E102 demap identity PASS; E104 self-check PASS (5 legs);
+M17 == m13 byte for byte PASS; E107 PASS under the amended rule (§13.7); and a lossless replay
+of the race capture whose WHUT video, WJLA video and WHUT audio lanes are **byte-identical** to
+this morning's 00:58 run — every speed change since then left the chain's output untouched.
+
+### 13.10 Live air — E109, and the first television from both PLPs (2026-11-07, 07:55–08:50)
+
+RF33 off the RSPdx, Antenna B with the bias-T, the gain table's rfgain_sel 4 / IFGR 32,
+`--plp1 --route 239.255.32.1:8321 --assets all`, 60 s runs, this 12-core PC.
+
+**First run (4 x 3): it worked, and it starved itself.** Lock at +464 Hz, PLP 0 100% of what it
+decoded, a clean 1080p frame of WHUT's Saturday-morning cartoon — but 138 Frames of ~243, 107
+dropped, two SDR overflows, two re-acquisitions, 0.53x. Cause: `SdrSource.open()` set up AND
+activated the stream inside `build()`, and the four workers then warmed for 19 s (each decoding
+a silent Frame in `SubframeDecoder.prewarm`) while the radio's 1.3 s ring buffer overflowed.
+The PLP 0 chain had the same wart at a smaller scale (2 s warm-up; the "startup overflow costs
+a re-acquisition" comment in the source).
+
+**E109.** (1) `prewarm()` builds tables only (BCH masks, LDPC edge tables, FFT plan): 0.2 s a
+worker instead of 3–6. (2) `SdrSource.open()` configures but does not stream; `start()`
+streams and `pause()` stops. The sniff starts and pauses the radio; the reader starts it again
+once the pool is warm and pushes ONE deliberate continuity break, so the front end re-acquires
+once on purpose instead of twice by overflow. (`FileSource` keeps its clock `rebase()`, §13.9.)
+
+| live RF33, 60 s | Frames (of ~243) | dropped | PLP 0 | PLP 1 | WHUT lane | WJLA lane | overall / instantaneous |
+|---|---|---|---|---|---|---|---|
+| 4 x 3, before E109 | 138 | 107 | 10212/10212 | 15178/16146 | 2 s | 73 s, 10 gaps | 0.53x |
+| 4 x 3, after | 227 | 16 | 16798/16798 | 26549/26559 | 40 s, no gap | 52 s, 8 gaps | 0.88x / 0.98–0.99x |
+| **5 x 2** | **239** | **4** | **17686/17686** | **27945/27963** | **56 s, 2 gaps** | **58 s, 3 gaps** | 0.93x / 0.90–0.93x |
+| 6 x 2 | 178 | 65 | 13162/13172 | 20779/20826 | 38 s | 51 s, 16 gaps | 0.68x |
+| 4 x 2 | 137 | 106 | 10133/10138 | 15612/16029 | 58 s (720 frames) | 56 s | 0.53x |
+
+On live air the main process also runs the radio reader and the front end, so the decode pool
+gets ten threads, not twelve: **5 processes x 2 threads** is this box's live layout, 98.4% of
+Frames, both stations' pictures nearly continuous. The replay's 4 x 3 oversubscribes by one.
+A few Frames a minute still shed at the margin; the next CPU to recover is the CPE's per-symbol
+Python (71 ms wall, ~118 CPU-ms a Frame) and the comb's remaining transforms.
+
+The live run also makes the point the race could not: on air, OnAir's PLP 1 bursts (§13.2) and
+our fixed-at-lock CFO loss (§13.6) are the same class of fault, and the chain now tracks the
+drift it measured here (+464 Hz at lock, +447 Hz a second later).
+
+### 13.11 E110 — the two-minimum min-sum correction, and the marginal-carrier win (2026-11-07, 09:00-09:30)
+
+The third thing OnAir does that we did not: the two-minimum (box-plus) correction of the
+min-sum check rule (their minsum_corr.h; the textbook Chen-Fossorier result). Every edge of
+a check that does not hold the smallest input gets, instead of min1, the box-plus of the two
+smallest, min1 (+) min2 = min1 + softplus(-(min1+min2)) - softplus(-(min2-min1)) -- closer to
+the belief-propagation message, needing one number the check already has. Written from the
+formula, not their code (NOTICE). In `ldpc_layered_kernel.c` as an AVX2 path (ABI 2, the
+`corr` argument; softplus(-t) as the max of four tangents, which vectorises and is a lower
+bound within ~0.02); switch `ATSC3_LDPC_BOXPLUS` / `fd.ldpc_boxplus`, OFF by default.
+
+**Gate (`gate_e107_ldpc.py`, the `box` column):** against the layered kernel, byte-identical
+on shared blocks, net gain at every noise level, deterministic. At 21 dB of added noise:
+layered 92/117 and 114/117 -> box 110/117 and 117/117. At 20.5 dB: layered 15 and 29 -> box
+32 and 58 (roughly doubles). On clean air it is free (no extra iterations); it only costs
+time on frames already failing (7 ms clean, up to ~2.5 s a frame grinding at the deepest
+cliff).
+
+**On the air it matters most where it is weakest.** Banked 45 s of RF25 (the market's
+weakest ATSC 3.0 carrier, bootstrap peak 77, -34 dBFS, LDM+CTI, PLP0 QPSK 9/15), replayed
+losslessly three ways on identical samples:
+
+| setting | CTI commutator | core blocks | video |
+|---|---|---|---|
+| flooding min-sum | never locks (0/35 clean on every candidate) | 86/2013 | none |
+| layered | never locks (0/35 clean) | 115/2013 | none |
+| **layered + E110 correction** | **locks** | **1426/5296** | **a lane written** |
+
+The CTI phase search confirms a candidate start_row only on 4 clean FEC Blocks. At this level
+min-sum decodes 0/35 on every candidate and never locks; the correction decodes just enough
+more that a candidate passes, the interleaver locks, and the decode runs away. The only
+difference between the layered and box runs is the one flag, so the lock is the correction's.
+This is the marginal-signal payoff OnAir's notes pointed at -- larger than the ~0.2 dB it is
+worth on strong carriers, because it crosses the threshold the lock logic needs.
+
+**Why still OFF by default.** On a live marginal signal the per-frame cost (up to ~2.5 s
+grinding) can blow the real-time budget and shed frames -- the opposite of help -- where the
+layered kernel is always faster. The clean fix is the E52 shed treatment the SP rescue
+already has (time-box the extra iterations, shed beyond, count), after which it can go on by
+default. Today it earns the offline/marginal-recovery win above; the deadline-box is the
+follow-up. Also still staged: the three ATSC 3.0 carriers here (RF25/RF30 LDM+CTI, RF33 not)
+and a quiet-box redo of the live stress timing (the 09:00 stress run's rate is contaminated
+by concurrent builds; its per-frame convergence counts stand).
+
+### 13.12 LDM speed — the profile that sets the plan (2026-11-07, ~10:00)
+
+RF25 (marginal LDM, 189 symbols/frame) decodes with the E110 correction but at ~0.3x real
+time. Profiling the OFDM demod directly (`core_cells` on the banked capture, lab/e104_out
+has the script) per frame: fft 82 ms, equalise 52 ms, cpe 50 ms, ce_smooth 10 ms = 193 ms
+(budget 242). Thread scaling 1/2/4/6/10 = 275/225/198/196/195 ms: it PLATEAUS at ~4 threads.
+The equalise and cpe are numpy loops that hold the GIL; scipy's FFT releases it and scales a
+little. So:
+
+* **Threads do not scale one channel's demod (GIL).** The 32-core's lever is more decode
+  PROCESSES (the demod is frame-independent; m44's LdmDemodPool already spawns worker
+  processes), not threads. The CTI + FEC stay serial.
+* **C kernels for equalise and cpe are a double win** -- faster AND they release the GIL, so
+  threads rescale. The `cellpool_kernel.c` equaliser and `demap_kernel.c` cpe_nearest both
+  exist on the m9_fast path and are not wired into the m44 demod. This is the next build.
+* **FFT (82 ms) is the GPU's job** (batched 8K cuFFT); it already releases the GIL and
+  scales. Parked until the GPU is sorted (Pascal GTX 1060 + Python 3.14 torch has no working
+  wheel) or tested on the bigger box.
+
+Honest bottom line for this 6-core box: the C kernels buy a worthwhile ~1.4x but not
+real-time; real-time for an LDM channel needs more cores (the 32-core, via processes) or the
+GPU for the FFT. The decoding itself is solved (E110); this is purely throughput.
+
+### 13.13 E111 — the compiled equaliser and nearest-point search on the LDM path (2026-11-07)
+
+The E103/E106 equaliser (`cellpool_kernel.c`) and the E105 nearest-point search
+(`demap_kernel.c`), both already bit-exact on the m9_fast path, wired into the LDM
+demod (`m44_ldm.FrameDemod`): `cellpool_row_sm_f64` / `cellpool_row_f64` per row in
+`cell_pool`, `cpe_nearest_f32` in `cpe_fast`.  Off: `ATSC3_LDM_CELLPOOL_KERNEL=0`,
+`ATSC3_LDM_CPE_KERNEL=0`.  Referee: `lab/gate_e111_ldm_kernels.py` on RF25 (189
+symbols, every row on the E60 smoothed estimate).
+
+**Measured, per frame (8 threads):** equalise 52.9 -> 29.6 ms (1.79x), cpe 53.4 -> 48.3 ms
+(1.11x), core_cells 192 -> 163 ms (1.18x).  Owner map, coherence, cpe output,
+core_cells (complex64) and determinism bit-identical on every frame.  The cpe win is
+small because the search was a minority of `cpe_fast`: the numpy reductions over the
+1.2 M-cell pool (two full passes, three reduceat/repeat rounds) are the rest.
+
+**Finding -- the pool is NOT bit-identical on a smoothed row, and it is numpy, not the
+kernel.**  ~6 ULP of full scale in a third of the cells.  Isolated: interpolation
+bit-exact, division bit-exact (0/6026 with the same H); the `H *= cl` complex multiply
+is the whole difference (2263/6625 of one row).  A scalar plain-double reference agrees
+with the kernel in 0 of 23,432 cells and disagrees with numpy -- numpy 2.5's complex128
+multiply reproduces neither the textbook two-rounding form nor an FMA one, which the
+`derot_f64` note in the same file had already measured.  So the gate's law is split, and
+is derot's: bit-identical wherever no gain multiply is involved (preamble cells, every
+un-smoothed row -- measured 0 diffs), within 1e-14 of full scale on smoothed rows (a few
+hundred ULP; a real error is O(1), thirteen orders away), bit-identity on everything
+downstream.  Recorded in `cellpool_row_sm_f64`'s comment.
+
+**Thread scaling, kernels on (1/2/4/6/10 threads): 177/163/164/163/164 ms** against
+275/225/198/196/195 off.  The "C drops the GIL so threads rescale" claim of 13.12 is
+retracted in its strong form: the equaliser does drop it, but it is 30 ms of the frame;
+the plateau -- now reached at 2 threads instead of 4 -- is set by the FFT (82 ms, on
+scipy's own workers) and the numpy CPE passes (48 ms, GIL-held), ~130 ms threads cannot
+touch.  At ONE thread the kernels are worth 1.55x, which is the number that matters for
+a many-process layout.  Next walls, in order: the FFT (float32 fast path with a
+decoded-bytes gate, or the GPU) and fusing the CPE's numpy passes into one C pass.
+
+Checkpoint committed (e40abef) and pushed before the replay referee ran -- the rule from
+here on: save before any new C runs.
+
+**Replay referee (lossless RF25, 2 procs x 4 threads): PASS.**  Every decoded lane
+byte-identical.  `live.json`, the one file that differs, differs in exactly 9 of its 70
+fields -- seven output paths (the two run directories) and the two wall-clock stamps --
+and in no decoded or statistical field.  Core 1426/5296 in both runs, 184 frames, 0
+dropped; the on-run log carries no fallback message, so the kernels ran inside the
+spawned demod workers (E86c: the lever engaged, and says so in `rep["cellpool_kernel"]`).
+Pipeline: 0.309 -> 0.322x real time, +4% only.  Amdahl on a saturated six-core: the demod
+is one share of the CPU, and `fec_dispatch` (389 -> 405 ms) names the other -- on this
+marginal carrier 73% of blocks never converge and each burns all 50 LDPC iterations in
+the FEC pool the main thread then waits on.  That hidden cost is the next lever (E112:
+early abort of hopeless blocks, under the E107 net-gain rule), ahead of the FFT.
+
+### 13.14 E112 — early abort of hopeless LDPC blocks (2026-11-07)
+
+**Why.** 13.13's replay named the cost E111 could not reach: `fec_dispatch` 389 -> 405 ms
+of a 1258 ms LDM frame is the main thread waiting on the FEC pool.  Sized with a per-block
+record (`ATSC3_LDPC_DUMP`: every call's iterations-to-converge and final syndrome weight,
+every 8th call's LLR block kept) over the RF25 replay: **94% of all LDPC work -- 661,050 of
+699,750 iterations -- is burned by blocks that never converge** (9.7% converge).  Blocks
+recorded 14,647; the CTI phase search re-submits, so more than the 5,296 counted.
+
+**The shape of a hopeless block, measured.**  Re-decoding 1,829 dumped 64800-bit blocks
+(alpha 0.85, nc = 25,920 checks) at fifteen iteration caps with the layered kernel:
+
+* A block that never converges is **flat from sweep 1** -- syndrome weight p50 10,075 at
+  cap 1 and 10,088 at cap 50; p5 above 9,350 from sweep 4.  It is not slowly failing; it
+  was never going to decode.
+* A block that converges **descends**: p50 7047 (sweep 1) -> 3047 (4) -> 343 (8) -> 11
+  (12) -> 0.  Half are done by sweep 25, 88% by 40, the last at 50 (so the cap itself is
+  not the lever; the cap is right).
+* The two populations are separated in LEVEL: at sweep 4 the worst eventually-converging
+  block is at 8,208; the 5th-percentile hopeless block at 9,352.  A threshold between them
+  is a zero-loss rule.
+
+**Rules, evaluated on the trajectories (ground truth = the kernel's own 50-sweep result):**
+threshold "at sweep k, give up if syndrome >= T": k=4, T=8563 aborts 1,721 of 1,739 hopeless
+blocks, saves 89.6% of LDPC work, loses 0; every zero-loss row from k=4 to 20 saves 58-90%.
+Stall "give up if no improvement since sweep k-m": at most 39% saved, and k=6,m=2 LOSES two
+blocks -- a hopeless block jitters about its flat level, so "did not improve" fires on only
+half of them.  Threshold is the rule.  Shipping choice **k=8, T=0.36 x nc** (9,331 here):
+14% above the worst converging block at sweep 8, ~80% saved; margin bought with savings,
+because 90 converging blocks on one carrier is a thin sample and the referee below runs on
+two other codes.
+
+**Mechanism.**  `ldpc_layered_kernel.c` ABI 3: `abort_k, abort_t, abort_stall` after `corr`
+(0 disables each; all zero is ABI 2, bit-identical).  A lane that fires keeps its hard
+decisions, conv=0, its=the sweep it stopped at, bad=its syndrome -- a failed block's
+meaning.  `ATSC3_LDPC_ABORT="k,T,stall"` (T<1 = fraction of the checks), `layered_decode_batch(abort=)`,
+`fd.ldpc_abort`.  Committed (0b303e6) and pushed BEFORE the first build of the new C: the
+rule from here on.  Referee: `gate_e107_ldpc.py --abort` -- an abort can only lose, so the
+law is stricter than E107's net gain: **zero blocks lost at every noise level**, bytes
+identical, faster; then the RF25 replay must return exactly the 1,426 blocks with
+byte-identical lanes.
+
+**Verdict.**  Gate (RF33, 16200-bit 64QAM 11/15 and 64800-bit 256QAM 11/15; as received and
+23/22/21.5/21/20 dB seeded): **abort loses no block at any level** -- at the 21.0 dB cliff,
+where the layered kernel converges 92/117 and 114/117, abort converges 92/117 and 114/117;
+bytes identical on every shared block; LDPC time over the gate flooding 22,822 ms, layered
+12,385, layered+abort **6,621 ms (1.87x over layered, 3.4x over flooding)**; at 20 dB, where
+nothing converges, 2,627 -> 1,211 ms.  RF25 replay, abort on: **core 1426/5296, identical**,
+184 frames, 0 dropped, 6 of 6 lanes byte-identical to the E111 run, no fallback; decode
+1233 -> 805 ms/frame (`fec_dispatch` 406 -> 219; `pool_wait` 669 -> 465, because the freed
+FEC pool also unblocks the demod workers that share it); **x rt 0.322 -> 0.452, +40%, and
++46% over the day's start (0.309)**.  The largest single pipeline gain of the day, for a
+fifteen-line change chosen by measurement.  Default ON from this commit
+(`ATSC3_LDPC_ABORT=0,0,0` turns it off); the gate passes (0,0,0) explicitly for its
+non-abort columns so they stay the pure kernel.  The frame is now 805 ms: pool_wait 465 is
+the demod again (FFT 82 ms of a 163 ms core_cells), and that is the next wall.
+
+### 13.15 E113 — the "FFT" that was a Python loop (2026-11-07)
+
+**The mislabel.**  13.12 profiled `core_cells` as fft 82 / equalise 52 / cpe 50 / ce_smooth
+10 ms and called the FFT the next wall, a GPU job.  Sizing it before building anything: a
+(189 x 8192) complex128 FFT is **14.8 ms**, flat from 1 to 8 workers (this batch does not
+parallelise); the strided-to-contiguous copy 3.3 ms; `fftshift` a 25 MB copy, 3.5 ms; the
+whole fft+shift stage **18.3 ms**.  complex64 would buy 2.7 ms and break bit-exactness --
+the float32 FFT path is dead.  So where were the other 64 ms?  `cell_pool`'s "fft" timer
+starts at the top of the function and also covers the PREAMBLE loop: `_demod_preamble_g`
+(2.8 ms per symbol) and **`FI.deinterleave` -- 30 ms per symbol, two symbols, 60 ms per
+Frame.**  The timer is now split so this cannot hide again.
+
+**The cause.**  `m3_freqint.interleaving_sequence` -- the A/322 7.3 frequency-interleaver
+address generator -- is a pure-Python LFSR loop over nmax (8192) iterations, and it was
+regenerated on every call.  The sequence is FRAME-CONSTANT: a function of (nfft, l,
+n_data, direction, toggle) only.  The data symbols' sequences were already built once in
+`tables()` (`Hmat`); the preamble path alone called it fresh each Frame.  60 ms of a 163 ms
+`core_cells`, in a loop that computes the same 5,395 integers every 242 ms.
+
+**The fix, E113.**  `interleaving_sequence` is an `lru_cache` over the generator, and every
+caller receives its OWN COPY (45 KB, 0.026 ms measured against 30 ms) -- so no caller can
+observe another's array and the cached call is bit-identical to the uncached one by
+construction (checked bitwise against the raw generator).  One place, every caller: m9_fast,
+M17, m13 and m44 all go through it.  Committed and pushed before the referees ran.
+
+**The CPE, sized while there (48 ms in situ):** normalise 9.7, decimate+unique 5.5, the C
+search 10.8, conj-mult+reduceat 13.8, repeat-divide 4.0, `unique(owner)` 8.3, final
+repeat-divide 7.6.  The two `np.unique(owner)` calls (~14 ms) are frame-constant too -- a
+bit-exact follow-up; the two full-pool passes (~17 ms) fuse into one C pass but change
+rounding, so they need the decoded-bytes gate.  Neither is urgent beside E113.
+
+**Verdict.**  gate_e111 PASS, pool bit-identical (the preamble cells are in it);
+`core_cells` 134 -> 103 ms with the kernels on, against 192 -> 163 before E113 -- the
+predicted 60 ms off both columns.  gate_e107 PASS, bytes identical on both PLPs (RF33's
+path goes through the same cache).  RF25 replay: core 1426/5296 identical, 6 of 6 lanes
+byte-identical, x rt 0.452 -> 0.462: **+2% only.**
+
+**The finding that matters: `pool_wait` did not move -- 465 -> 464 ms -- while the demod it
+waits on got 37% faster.**  The pool's wall time per Frame is no longer the demod's
+arithmetic.  It is the plumbing: 2 x 4 threads on six cores (the demod plateaus at 2
+threads, 13.13, so the other two are contention), demod and FEC sharing the same worker
+processes, the 25 MB window and the 19 MB pool copied through shared memory every Frame,
+and the serial main thread (`fec_dispatch` 253 ms) that must drain a slot before the pool
+can take the next window.  Per-Frame math is now cheap enough -- demod 192 -> 103 ms,
+LDPC 1.9x -- that further kernels will not move this box's real-time rate.  The lever is
+the layout and the structure.  Next measurement, zero code: a procs x threads sweep of the
+replay.  The CPE's frame-constant `unique(owner)` (~14 ms, bit-exact) is demoted for the
+same reason.
+
+### 13.16 The layout sweep, the frames that were "lost", and what actually scales (2026-11-07)
+
+**The sweep.**  13.15 ended on "the lever is the layout".  `--ldm-procs x --ldm-proc-threads`
+on the RF25 replay (the LDM pool's own flags; `--decode-procs`/`--threads` are the RF33
+path's and do not reach it -- this box defaults to 2 x 4): 2x4 0.461, 2x2 0.398, 3x2 0.477,
+4x1 0.486, 4x2 0.492, 5x1 **0.652** -- and not one of those is a throughput number, because
+the block counts moved with the layout on a LOSSLESS replay (1426/5296 at 2x4 and 2x2,
+1550/5433 at 3x2, 1329/5050 at 4x1, 708/3308 at 5x1) and so did the decoded lanes (2x2 and
+3x2 byte-identical to 2x4; 4x1, 4x2 and 5x1 not).  5x1 was "fast" by doing 63% of the work.
+
+**The wrong fix, measured and reverted.**  `late_frame_dropped` was 7 of 184 Frames even at
+2x4 and 11 at 5x1, and CtiStream.push zero-fills a gap then drops the real Frame when it
+arrives -- so E114 fed the CTI through a reorder buffer.  The referee was flat: identical
+counts, `gap_filled` 0 on every layout.  Traced (`ATSC3_CTI_LOG`): the feed is strictly in
+Frame order -- the buffer never had anything to do.  Reverted; a lever that silently no-ops
+is worse than one that is off (E86c).
+
+**What the "late" Frames are.**  Every one is `idx = origin - 1` immediately after
+"CTI phase candidate: Frame N": reset() sets the origin to the Frame whose L1 was just read
+while Frame N-1 is still in flight, and it lands behind the new origin.  Frame 5 -> 4,
+10 -> 9, 146 -> 145, 151 -> 150, 156 -> 155, 161 -> 160, 166 -> 165: seven adoptions, seven
+"late" Frames.  They are PRE-ORIGIN Frames the new stream does not want.  Benign; the
+counter is misnamed, not the data lost.
+
+**What actually scales with the layout: re-acquisition cadence.**  On this marginal signal a
+candidate is adopted, judged over 35 Blocks, rejected (0/35 clean), the CTI goes cold --
+and the next fresh L1 is read FIVE Frames later (146, 151, 156, 161, 166), because the
+pool already holds nslots = nproc + 2 = 4 submitted Frames when it goes cold and the L1
+is read from the next window to enter.  At 5 procs that is 7 in flight, ~8 Frames per
+rejected candidate instead of ~5, and a different set of Frames gets its L1 read, so the
+search walks a different path and locks at a different time: hundreds of Blocks either way
+on a 45 s capture, and 3x2's 1550 was the cycle landing on a better candidate.  The
+consequence is general and matters for the bigger box, whose default is 6 processes:
+**on a marginal carrier, more processes re-acquire SLOWER.**  The old E85 scaling note
+(4 procs 1.49x, 6 procs 2.01x) was measured on a locked signal and is not contradicted,
+but it does not cover this.  Decoupling the L1 re-read from the pipeline depth -- reading it
+from the most recent completed window the moment the CTI goes cold -- is the next build,
+and until it lands the layout sweep is only meaningful after lock.
+
+### 13.17 E115 — re-acquire from the held window; the layout sweep, honestly (2026-11-07)
+
+**Mechanism.**  `push_frame` keeps a copy of each window until the CTI has consumed its
+Frame (at most the in-flight Frames, nslots x ~27 MB); at either FEC-verdict cold site
+(`every candidate rejected`, `out of range too`) `_reacquire_now` reads L1 from the oldest
+unconsumed window and anchors there.  Not hooked at the range-gate cold inside `_begin`
+(same window, same candidates: it would only recurse).  Counter `ldm.stats.reacquired_from_window`.
+
+**Referee (RF25 lossless replay, 2x4 / 3x2 / 5x1).**  The lever engaged (14 / 14 / 13
+re-acquisitions).  **Decoded lanes byte-identical across all three layouts** (6 of 6 each;
+before E115, 5x1 matched 2 of 4), and 2x4 and 3x2 agree block for block (1571/5763).
+Blocks 1426 -> 1571 on the default layout: the in-flight Frames are kept.  Lane bytes
+identical in size to before -- on this capture the kept Frames added accounting, not picture.
+
+**The cost, attributed.**  x rt 0.461 -> 0.420 on 2x4.  Not the copies, not the L1 reads
+(`l1` 5.4 -> 8.1 ms/frame); it is `fec` 43 -> 77 ms/frame, because **candidate attempts
+went 9 -> 16**: a rejected candidate used to be followed by ~5 Frames of forced waiting, and
+re-acquiring at once runs the adopt-judge-reject cycle nearly twice as fast on a carrier
+that mostly fails to lock, ~35 Blocks of FEC per attempt.  So: on a carrier that locks and
+stays locked, E115 costs nothing (no cold events); where a rejection is followed by a
+successful re-acquire it saves ~5 Frames (1.2 s) of blackout per event, the live-TV win;
+where nothing locks it spends ~9% trying harder.  Kept ON, because the output no longer
+depends on the process layout -- the correctness point, and what makes the bigger box's
+six-process default behave like this box's two.  Follow-up if live testing shows the
+treadmill hurting: throttle held-window re-acquisition to one per cold event.
+
+**The layout sweep, now meaningful.**  2x4 0.420, 3x2 0.434, 5x1 0.433 -- within 3%.  On
+this six-core box the layout barely matters: 5x1 does cut `pool_wait` (458 -> 365 ms) but
+the main thread's serial work (`fec` 77 + `fec_dispatch` 244 + CTI gather) absorbs it --
+the cap the E85 note found "past 6 processes", seen from here.  No default change for this
+box class.  The next structural lever for throughput is that serial main thread; the
+32-core test will show where it caps.
+
+**Day's ledger, RF25 on this box:** 0.309 -> 0.420 x real time with layout-independent
+output (0.461 before paying for E115's determinism); demod 192 -> 103 ms; LDPC 1.9x;
+every decoded byte identical throughout E111-E113; E114 reverted on evidence.
+
+### 13.18 Live, RF25, the whole day's stack (2026-11-07 12:03)
+
+Antenna B, 90 s, E111-E113 + E112 abort + E115 on, the E110 correction on (ATSC3_LDPC_BOXPLUS=1),
+default 2x4 layout, against the morning's live baseline on the same carrier (pre-E111: 79
+Frames, 1770/4400 blocks, 0.22x, no video lane):
+
+**125 Frames (+58%), 2255/6922 blocks (+27%), 0.323x real time (+47%); phase-locked from
+10.3 s and locked through the end (17 status lines); E115 re-acquired 3 times across 4
+candidate adoptions -- no treadmill on air, so no throttle on this evidence.**  Still not
+watchable: at 0.32x the front end shed 246 Frames and no complete video object was
+assembled.  The live frame is 1182 ms -- pool_wait 661 + fec_dispatch 384 = 88% waiting,
+worse than the 833 ms replay because the front end, tracker and reader share the same six
+cores with the pool.  On this box the LDM carrier now decodes and holds lock on air; what it
+lacks is cores, and the serial main thread will be the cap once it has them.  That is the
+32-core test: `--ldm-procs` 6 / 8 / 12 / 16 with `--ldm-proc-threads 2`, block count and
+lanes unchanged by the layout (E115), and the rate's ceiling named.
+
+### 13.19 The GPU path, refereed (2026-11-07, torch 2.14.1+cu126 on the GTX 1060)
+
+**torch.**  Python 3.14 + Pascal has exactly one working wheel: 2.14.1+cu126 (2.15 is built
+cu132 and dropped Pascal; the cu126 index stops at 2.14.1).  Real kernel on the 1060: 3,540
+GFLOP/s.  The wheel is kept at `~/.cache/torch_wheel/` -- the download drops constantly --
+and the install needs `TMPDIR` on /home, not the RAM-backed /tmp.
+
+**Referee: RF33 lossless replay (`live_rf33_antB.cs16`, 20 s), `--accel cpu` vs the GPU modes.**
+cpu: 80 Frames, 5920/5920 + 9360/9360, 1.03x.  `gpu-full`: 46 Frames before the 300 s
+timeout, 0.04x.  `gpu` (LDPC only): 36 Frames, 0.03x; with `--decode-procs 5`: 35, 0.03x.
+**Every GPU lane is an exact byte-prefix of the CPU lane** (video 3,128,687 bytes identical
+on gpu-full; 4 of 4 lanes on both gpu legs) and every block it touched converged: the GPU
+LDPC is bit-correct.  Engaged, by its own timers (`gpu_bicm`).  **On its own stage it is
+fast: ldpc 80 ms vs the CPU's 225 (2.8x).**
+
+**Why 0.03x anyway -- a mis-wiring, not the GPU.**  Beside the GPU LDPC, every CPU stage ran
+5-10x slower than in cpu mode: cell_pool 470 vs 44, demap 494 vs 101, cpe_correct 490 vs
+182, the front end 763 vs 39 (notch 466 vs 0).  Those are exactly the stages the E102-E108
+kernels serve, and `m11_watch` gates them off: `cpu_fast = (accel == "cpu" and not
+exact_cpu)` at lines 397, 963, 1020 and 1526 -- so a GPU accel runs the HEAD-exact float64
+path with no kernels at all -- and `use_procs` requires `accel == "cpu"` (974), so the
+explicit five processes were ignored.  The GPU modes also print no mode line (E86c).  The
+only tracebacks, one per timed-out run, are shutdown races at the kill (`cannot schedule new
+futures after shutdown`, `write to closed file`): benign.
+
+**What it would take, and what it would pay.**  E116: let `cpu_fast` depend only on
+`--exact-cpu`, let the GPU backend replace only the LDPC (and CPE), allow processes in gpu
+mode, and gate it as E107 was gated -- the GPU is a flooding min-sum against the CPU's
+layered kernel, so the law is net gain >= 0 at every seeded level and bytes identical on
+shared blocks.  Payoff on this box: RF33 ldpc 225 -> 80 of a ~1320 ms Frame, ~11%, which is
+headroom for both PLPs live.  **Not an LDM lever here:** the LDM LDPC is 60 ms with the
+E112 abort, which the GPU min-sum does not have, so on a marginal carrier it would run all
+50 sweeps on every hopeless block and lose.  The GPU is a modest RF33 / multi-channel lever
+on this box, nothing more; the LDM wall remains cores and the serial main thread.
+
+### 13.20 The 32-core box (2026-11-07, Windows 11, Threadripper 32c/64t, MSYS2 gcc 15.2, Python 3.12)
+
+The question 13.18 set: with cores, does one LDM channel reach real time, and what caps
+it.  Setup as INSTALL says; all seven kernels built and smoke-tested with the MSYS2 gcc the
+build scripts find on their own.  The Linux box's marginal capture never arrived, so RF25
+was banked HERE on the RSPdx (`tools/atsc3_capture.py`, Antenna B, rfgain_sel 2, IFGR 32,
+bias-T on, 0 overflows, no clipping, `C:\captures\rf25_win_45s_b.cs16`), and it is a
+STRONG RF25: 80% of blocks converge as recorded.  The marginal regime was then made from
+it with `lab/add_noise_cs16.py` (seeded complex Gaussian, stated dB below the recorded
+power): 20 dB = 74% of blocks, 15 dB = 59%, **12 dB = 21% -- the Linux capture's 27%**,
+and 9 dB and below never lock.  PothosSDR's SoapySDR binding is Python-3.9-only, so 3.9
+was installed for the capture tool; radioconda's 3.12 (which has SoapySDR) drives the live
+chain (`tools/atsc3_watch_av.py`), where the one-viewer lock's `fcntl` import killed the
+viewer on Windows -- fixed with `msvcrt` (E117 commit).  WJLA 7.1 with 5.1 sound and
+captions ran 7 minutes from this box at 8 x 2, 0 drops, 0 fails.
+
+**The sweep (lossless replay, `--ldm-proc-threads 2 --threads 4`, as-recorded RF25):**
+
+| P | x rt | fec | lanes vs P=4 |
+|---|---|---|---|
+| 4 | 0.807 | 4943/6161 | reference |
+| 6 | 0.978 | 4943/6161 | 4/4 byte-identical |
+| 8 | 1.042 | 4908/6126 | 4/4 byte-identical |
+| 12 | 1.121 | 4698/5951 | video a shorter exact prefix |
+| 16 | 1.210 | 3824/5040 | all four differ from 0x15F93C |
+| 24 | 1.205 | 4970/6300 | all four differ |
+| 32 | 1.209 | 4138/5426 | differ |
+
+Real time from 8 processes; a plateau at 1.21x from 16.  At P=24 `pool_wait` is 0.0 and
+`fec_dispatch` 9, and what is left is the serial main thread -- `cti_gather` 93 + front end
+79 + `fec` 7 + `l1` 3 of the 242.5 ms budget -- which CONFIRMS the old m11_watch note
+("past 6 the parent's own serial work is the limit"), with one addition: both of those grow
+with P (cti_gather 36 -> 93, front end 28 -> 79 ms), so part of the cap is contention from
+48 worker threads, not fixed work (24 x 1 thread: cti_gather 60, front end 48, the same
+1.19x because the pool then waits).  The non-LDM path on a fresh 20 s RF33 bank: decode-procs
+4/8/12/16 = 0.94/1.15/1.24/1.31x, PLP 0 5920/5920, lanes byte-identical across D; gate_e107
+PASS on that bank.
+
+**E115 does not hold here, and the reason is a race.**  Every run loses the CTI lock on the
+same air ("FEC collapsed over the last 24 batches"); the recovery is the blind sweep, and
+`_begin(self.cti.next_frame, blind=True)` anchors it at the CTI's position WHEN THE
+ASYNCHRONOUS FEC VERDICT ARRIVES.  More processes in flight move that position (k=0
+start_row 298/298/--/344/556/722 for P=4/6/8/12/16/24), a different anchor gives a different
+dead-reckoned candidate set, and the search locks at a different start_row and Frame.  A P=4
+run with only the LDPC dump switched on (file writes inside the FEC) produced different
+lanes from two clean P=4 runs: same layout, different timing, different bytes.  Lanes are
+byte-identical up to the lock loss in every run, so demod and FEC are layout-independent;
+E115 fixed the cold path and the lost-lock path still depends on pipeline depth AND on
+scheduling.  The fix has to anchor on stream order (the batch that tripped the loss window),
+not on `cti.next_frame`; it is not in this commit because every lock-path gate is soft until
+it lands, and the throughput work below was refereed on recorded LLRs instead.
+
+**E117 -- the pool's own timeline.**  `LdmPipeline.close()` dropped the pool before
+m11_watch called `summary()`, so every pooled JSON ever written had
+`demod_ms_per_frame: {}`: the workers' timers were collected and thrown away.  Kept now,
+plus queue-wait, out-queue latency and ordering-wait around each job (perf_counter stamps
+cross the process boundary).  Lanes byte-identical at P=4 and P=8 to the uninstrumented
+runs.  What it says, per Frame, summed over workers, P=4:
+
+| regime | demod in worker | FEC batch (LDPC) | demod job queued behind FEC | ordering wait | copies |
+|---|---|---|---|---|---|
+| as recorded (80%) | 212 | 877 (706) | 856 | 151 | 4 + 7 + 13 |
+| 15 dB (59%) | 243 | 974 (827) | 963 | 207 | ~same |
+| 12 dB (21%) | 243 | 895 (837) | 879 | 404 | ~same |
+
+The copies are nothing.  The pool is four-fifths FEC in EVERY regime on this capture, the
+demod (132 ms standalone, gate_e111 PASS here) runs at 212-243 inside a worker because it
+shares the process with the FEC, and in the marginal regime the main thread adds its own:
+the synchronous probing FEC (137 ms a Frame -- 35 Blocks decoded to judge a candidate that
+LOCK_BLOCKS = 4 would judge) and the L1 re-reads (77 ms a Frame) of the E115 treadmill, 30
+re-acquisitions in 45 s.  Where nothing locks at all (9 dB and below) the treadmill alone
+holds the rate at 0.36-0.49x: 49-81 candidates, `fec` 212-277 + `l1` 169-573 ms a Frame.
+
+**E118 -- lane compaction, measured and parked.**  The per-block record (ATSC3_LDPC_DUMP,
+378 batches, 11,633 blocks) showed each 8-lane vector running to its SLOWEST lane: 37,323
+vector-sweeps where the lanes' own counts sum to 27,674 vectors' worth, the slow lane a
+near miss running all 50 sweeps while seven retired lanes ride along.  Built as a second
+entry point `ldpc_layered_pack_f32` (ABI 4; any nblk, lanes refilled as blocks retire, the
+sweep-0 check at load so a clean block still retires with its = 0).  `gate_e118_ldpc_pack.py`:
+0 mismatches on bits, conv, its and bad over 1,162 banked blocks under both share layouts,
+deterministic -- and 0.98x, because with ~17 blocks per thread-share the near-miss lanes end
+up ALONE at the tail of each share (26% of the pack's sweeps run with one or two lanes
+active) and a refill costs about a sweep.  The recorded schedule says the gain needs the
+tail amortised ACROSS batches (one 8-lane share per batch, two batches per worker at once:
+24% off; 70-block merged batches: 20%), a pool change.  OFF by default (`ATSC3_LDPC_PACK=1`),
+kept for that change; gate_e107 PASS with identical verdicts under it.
+
+**E119 -- the L1 decoders on the kernel.**  Profiled: an L1 read from a held window was 316
+ms, 73 of it L1-Basic's numpy min-sum of which 42 ms was `pack()` rebuilding the
+code-constant check tables on EVERY call (E113's lesson, again).  L1-Basic and L1-Detail now
+run their one block through the compiled flooding kernel (float32, alpha 0.75, the same
+rule) and `pack()` is cached.  `gate_e119_l1_kernel.py`, 36 windows off the bootstrap grid
+of the clean, 15 dB and 12 dB banks: L1 fields identical on every window where either path
+verifies, the same 31 verified, **316 -> 20 ms an L1 read (8.8x)**.  On by default.  Replay
+at 12 dB: 0.473 -> 0.561x (+19%), 958/4541 both; clean air unchanged and byte-identical.
+
+**E120 -- the probe size, a knob.**  `ATSC3_LDM_PROBE_BLOCKS=k` judges a provisional phase
+on the first k Blocks instead of every Block available.  k=8 at 12 dB: 0.561 -> 0.639x
+(+14%), but 932 vs 958 blocks, and -4% at 15 dB, -0.7% clean -- the verdict's statistics
+change.  Off by default; Felbs' call.
+
+**E121 -- the alpha ladder is per code, and this code had it backwards.**  The record,
+grouped into ladders (alpha 1.0 -> 0.85 -> 0.75, each rung only on the rows still failing):
+as recorded, rung 1 converged 2,449 blocks and rung 2 converged 2,556 MORE -- blocks rung 1
+had ABORTED AS HOPELESS at sweep 8 (their rung-1 syndrome 9,331-10,502, the E112 threshold
+being 9,331, sized at alpha 0.85) -- and rung 3 converged 1 for 30% of all sweeps; at 12 dB
+rung 1 converged 0 of 4,716 and rung 2 954.  M10 chose 1.0 first on the 64800 rate-6/15
+code; RF25's core is 9/15 and the E110 correction changes the scale.  `gate_e121_ladder.py`
+runs each variant on the recorded first-rung LLRs with the ladder's own semantics (1,136
+blocks, two noise levels), judged on lost / gained / sweeps / bits on shared blocks:
+
+| ladder | as recorded: conv lost gain, vec-sweeps | 12 dB: conv lost gain, vec-sweeps |
+|---|---|---|
+| ship (1.0, 0.85, 0.75) | 623 0 0, 4653 | 142 0 0, 4816 |
+| (0.85, 1.0) | 623 0 0, 2884 (-38%) | 142 0 0, 2798 (-42%) |
+| (0.82, 1.0) | 624 2 3, 3069 | 208 0 66, 2811 |
+| **(0.82, 0.85, 1.0)** | **626 0 3, 3982 (-14%)** | **208 0 66, 4150 (-14%)** |
+| 1.0 only | 239 384 0 | 0 142 0 |
+
+Bits identical on every shared block for every variant.  Shipped: **(0.82, 0.85, 1.0) for
+the 64800 rate-9/15 code with the correction on** -- no block lost at either level, +46% of
+blocks at 12 dB, 14% fewer sweeps; every other code keeps M10's ladder; `ATSC3_LDPC_LADDER`
+overrides.  (0.85, 1.0) is the pure-speed alternative if margin is not wanted.  Replay:
+P=4, E119 already on: 12 dB 0.561 -> 0.598x and **958 -> 1,389 blocks (+45%)**, re-acquisitions 30 -> 19; 15 dB 0.642 -> 0.728x, 3,292 -> 3,447; as recorded 0.817 -> 0.913x, 4,943 -> 5,023, LDPC 702 -> 577 ms a batch.  gate_e107 PASS after it (the RF33 codes keep their ladder).  Day's ledger at 12 dB on this box, P=4: 0.473 -> 0.598x with +45% of blocks (0.704x with the probe knob); as recorded 0.814 -> 0.913x.
+
+**Abort rule re-sized here** (`lab/size_ldpc_abort.py`, truth = no abort, per-file alpha):
+on the as-recorded first rung the shipping (8, 0.36, 0) loses 0 and saves 75% of vector
+sweeps; (6, 0.33, 0) saves 80% at 0 lost; nothing to change.
+
+**Where this leaves the 6-core box.**  Its regime is the 12 dB row.  Levers in this commit
+that reach it: L1 on the kernel (+19% here), the ladder (+46% blocks at the cliff, -14%
+LDPC); knobs it can try: probe 8 (+14%, costs blocks), pack (nothing until the pool packs
+across batches).  What this box could not test: its contention (the worker demod at 212-243
+vs 132 standalone is the FEC sharing the process), which argues for demod-only and FEC-only
+workers, and the lost-lock anchor.  The next run there is `--ldm-procs 2 --ldm-proc-threads
+4` on the marginal capture with this commit, and the JSON's `pool_ms_per_frame` says the
+rest.
+
+**Live RF25 from this box (16:35, Antenna B, 8 x 2, 90 s, `--player none`).**  The first
+LDM television off this machine: 358 Frames, 8,139/11,360 blocks, 0.93x sustained (live is
+capped at 1.0x by the air; the deficit is the two acquisitions), 13 Frames shed, 0 SDR
+overflows, all four lanes written (video 15.3 MB, 64 s), locked twice and lost twice, E115
+re-acquired 11 times.  The pool kept up: `pool_wait` 5 and `fec_dispatch` 24 ms a Frame
+against the 6-core box's 661 + 384 in 13.18.  **The marginal regime with E119 + E121**
+(12 dB file): P=4 0.598x, 8 0.726, 16 0.788, 24 0.812, converged blocks identical (1,389)
+on all four.  The cap there is the serial main thread again, 304 ms at P=24 -- front end
+134 and `cti_gather` 93 inflated by contention, the probing `fec` 75 from 18
+re-acquisitions -- so the marginal LDM channel is 0.81x on 32 cores and the next lever is
+structural: the probe (E120 showed +14%), the treadmill, and the worker split.
+
+**E122 -- the LDM round trip DESIGN_NOTE asked for, built and PASSED.**  `lab/gate_e122_ldm_roundtrip.py`:
+Core and Enhanced FEC Blocks synthesized through the receiver's own transmit path (`PlpChain.encode`),
+superposed per A/322 7.2 at the signalled injection (unit-power layers, g = 10^(-inj/20)), the Enhanced
+stream at its own block offset, seeded noise at stated Core SNRs, and leg B through the 1024-row CTI
+(`m10_cti.interleave`, de-interleaved by the receiver's function, cancelled in that domain -- E69's
+plan).  Receiver = the live chain's demapper (right sigma^2), the layered kernel with the per-code
+ladder and the E112 abort, BCH.  Canceller = E69's (re-encode, least-squares gain, subtract), run as
+ORACLE (transmitted payload) and REAL (the decoded payload).  Both configurations PASS: noiseless, every
+Core and Enhanced Block decodes after REAL cancellation with payloads equal, |gain| 0.9995-1.0005,
+residual power g^2/(1+g^2) as predicted; a wrong payload leaves 0.84-0.94 of the received power (the
+control fails to cancel, as required); through the CTI the de-interleaved cells are exact and the
+Enhanced layer decodes 35/35 and 47/47.  Thresholds, synthetic AWGN: **RF30's Enhanced layer (64QAM-NUC
+6/15, 4 dB injection) decodes down to 13 dB of Core SNR = 9 dB on its own layer -- E69's measured
+number -- and is 0/35 at 12**; **RF25's (256QAM-NUC 7/15, 10 dB injection) needs ~22.5 dB of Core SNR
+(47/47 at 23, 14/47 at 22, 0 at 21) = ~12.5 dB on its own layer.**  So the canceller inverts itself; the
+August RF30 failure was the link (E69 measured ~6 dB on the Enhanced layer against 9 needed), not a rung,
+and "3 dB short" is now a result.  RF25's Enhanced layer is out of reach of the yagi by ~15 dB (its Core
+converges 80% at a QPSK 9/15 threshold of a few dB); the Philips, where the gain table calls RF25 strong,
+is the antenna to try.  Still untested on air: the Enhanced PLP's own C anchor and the NUC alphabet at a
+live SNR, which the round trip cannot see (M6's law).
+
+**E123 -- the re-lock is a function of the stream.**  Three changes, each found by
+`lab/gate_e123_relock.py` failing on the previous one: (1) the blind sweep after a LOST lock
+anchors at the Frame of the batch that tripped the loss window + LOSS_LAG + 1 (default 12
+Frames), with the parent settling every FEC verdict older than LOSS_LAG Frames before cutting
+more Blocks so the anchor is always ahead of the CTI (`loss_lag_wait` 0 at 4x2, 77-129 ms a
+Frame at 16-24x2, `loss_anchor_behind` 0 everywhere); (2) a COLD floor -- no fresh L1 from a
+Frame below the point the stream went cold, because a deep pool still delivers those Frames
+and a shallow one has consumed them (the 15 dB file re-locked at Frame 35 on 24x2 and 38 on
+4x2 for exactly that reason); (3) ONE cold L1 read per Frame through a single routine for held
+and arriving Frames, from the floor up (E115 read every held window at once, then the arriving
+Frames again).  Gate, the same capture replayed as a user would: clean RF25 at 4x2 twice, 8x2,
+16x2, 24x2; the 15 dB and 12 dB copies at 4x2 / 16x2 / 24x2 -- **converged counts identical,
+lanes byte-identical, final lock identical on all three captures.**  Verdicts landing after
+the loss tripped are no longer counted (a 35-Block fec_total wobble).  Throughput unchanged
+(clean 24x2 1.22x).  The lock-path numbers of 13.16-13.20 can be re-measured with a referee
+now; the E117 sweep's "lanes differ from P=12" row is this commit's before.
+
+### 13.21 The 6-core box, with 13.20's levers (2026-11-07 evening, Omarchy, Ryzen 1600X 6c/12t, gcc 16, Python 3.14.8)
+
+The handoff's question: what does this box do now, and where does its time go.  Same box
+and install as 13.12-13.19 (the "previous OS install" clause did not apply): the existing
+clone pulled to 9ad6d74, the existing venv (numpy 2.5.4, scipy 1.18.1), both captures on
+disk.  All seven kernels REBUILT from the pulled source -- `ldpc_layered_kernel.c` had
+changed (E118, ABI 4) and the morning's ABI-3 binary would have been refused and silently
+replaced by flooding -- every smoke test PASS, the layered library loading at ABI 4.  The
+radio is on the other box; replay only.  `OPENBLAS_NUM_THREADS=1`, `ATSC3_LDPC_BOXPLUS=1`.
+
+**A. The number of record, `--ldm-procs 2 --ldm-proc-threads 4 --threads 4`, lossless.**
+
+| | 13.17 (E111-E115) | now (+ E117-E124) | |
+|---|---|---|---|
+| x real time | 0.420 | **0.451** | +7% |
+| converged / total | 1571 / 5763 | **1916 / 5719** | **+22% blocks** |
+| frames, dropped | 184, 0 | 184, 0 | |
+| lock lost, re-acquired | -- | 1, 8 | |
+
+`ldm.stats`: l1_verified 10, lock_lost 1, reacquired_from_window 8, phase_rejected 8,
+phase_rejected_range 20, pre_floor_skipped 3 (E123's cold floor), p4_agree 1;
+`loss_anchor_behind` and `loss_lag_stalled` are written only when non-zero -- both 0;
+`fec_after_loss` likewise (0 here; 3 at 5x1 in E).  The one loss: 19:31:44 "CTI lock LOST (FEC
+collapsed over the last 24 batches) -- sweeping +-6 Frames from Frame 150", re-locked by the
+blind sweep at origin Frame 164, start_row 198, 19 candidates rejected on the way.  The lanes
+are, as 13.20 said they would be, not the old record's bytes: E121 changes which blocks
+converge and E123 the re-lock.
+
+**Where the time goes, ms per Frame (budget 242.5).**  Main thread: front end 30.9; decode
+853.4 = pool_wait 450.0 + fec_dispatch 269.2 + fec 48.2 (fec_ldpc 40.0) + cti_gather 27.5 +
+win_hold_copy 8.9 + l1 **1.3** (E119: 8.1 in 13.17, 17.9 live in 13.18) + the rest under 4;
+HEADROOM 0.28x.  **The pool (E117, summed over the two workers, per Frame):** worker_qwait
+1393.1, worker_demod 202.1, out_q_latency 45.7, park_wait 24.3, submit_copy 6.5;
+fec_worker_qwait 1093.4, **worker_fec 780.4** (w_fec_ldpc **657.5**, w_fec_demap 81.3,
+w_fec_descramble 30.5, w_fec_bch 7.9, w_fec_bitdeint 6.7, w_fec_widen 6.4), fec_park_wait
+14.3, fec_out_q_latency 0.8, fec_submit_copy 2.4.  Demod stages inside the worker: cpe 92.5,
+fft 50.9, equalise 48.6, ce_smooth 22.5, dummy_ref 1.2 (= the 202).
+
+What that says, in order.  (1) **The pool is 79% FEC** (780 of 982) -- 13.20's "four-fifths
+FEC in every regime", reproduced on the box it was predicted for.  (2) **The demod runs at
+202 ms inside a worker against 103 standalone** (gate_e111 here, 13.15): the FEC sharing the
+process, exactly as E117 measured on the 32-core (212-243 vs 132).  The copies are nothing
+(6.5 + 2.4).  (3) **The LDPC is 657 ms a Frame summed over workers at 27% convergence,** and
+that is the price of E121's blocks: with the ladder, a hopeless block is aborted at sweep 8 on
+EACH of three rungs -- ~24 sweeps where E112 alone spent 8 -- while 13.20's "-14% sweeps" was
+measured on the blocks a rung keeps.  Here 73% of blocks are hopeless.  The lever this names
+is a two-level abort: a block flat at ~0.39 x nc is hopeless for every rung and should be
+dropped once; the near misses just above the E112 threshold (9,331-10,502, the ones rung 2
+rescued) should get the next rung.  The E124 bank written in C below is the data to size it.
+(4) The main thread still spends 84% waiting; the L1 reads that were a treadmill in 13.17
+are 1.3 ms.
+
+**B. `gate_e123_relock.py --layouts 2x4,2x4,4x1,5x1`: PASS.**
+
+| layout | x rt | converged / total | lock | lost | re-acq | anchor behind | lag wait |
+|---|---|---|---|---|---|---|---|
+| 2x4 | 0.452 | 1916 / 5719 | origin 164, start_row 198 | 1 | 8 | 0 | 0.0 |
+| 2x4 | 0.452 | 1916 / 5719 | origin 164, start_row 198 | 1 | 8 | 0 | 0.0 |
+| 4x1 | 0.455 | 1916 / 5719 | origin 164, start_row 198 | 1 | 8 | 0 | 0.0 |
+| 5x1 | 0.469 | 1916 / 5719 | origin 164, start_row 198 | 1 | 9 | 0 | 0.0 |
+
+Counts identical, lanes byte-identical, final lock identical, anchor never behind and never
+stalled: the re-lock is a function of the stream on this box too, and 13.16's layout sweep --
+unmeasurable then because the lock path depended on timing -- now has a referee behind it:
+the layout still barely matters here (5x1 +4%).
+
+**C. The marginal carrier's real SNR, E69's way (`ATSC3_FEC_CELL_DUMP`, every 10th batch; `e124_ldm_snr.py --inj 10 --need 12.5`).**
+The dump replay reproduced A exactly (0.449x, 1916/5719; 18 batches banked, 141 MB, parent
+and workers).  The analysis first CRASHED -- and the crash is a finding about the bank, on
+both boxes: the writer stored `bch_ok=np.asarray(syn == 0)`, but `bch_syndrome_batch` returns
+a Python LIST of ints, so `syn == 0` is the scalar `False` and every bank ever written carries
+a 0-d `False` for `bch_ok` -- no per-Block BCH flag at all; `ok[i]` fails on the first file.
+Fixed in both places: the writer now banks `[s == 0 for s in syn]`; the reader, meeting a
+batch-scalar flag, judges a Block clean when it converged and carries a packet (exact in this
+chain: `bch_zero == fec_converged`, 1916 = 1916).  On this bank, then: 562 Blocks, 219
+BCH-clean and re-encoded through `PlpChain.encode`, fitted |gain| median 0.930, P_core -2.10 dB
+of the total, P_residual -4.16 dB (cancellation gain 4.16 dB), negative control leaves 0.888 of
+the received power (fails to cancel, as required).  **Core-layer SNR 2.05 dB** -- a QPSK 9/15
+Core at its cliff, which is what 27-33% convergence looks like.  **Enhanced-layer SNR -7.19 dB
+against the 12.5 dB E122 measured it needs: margin -19.7 dB, SHORT.**  13.20 estimated "out of
+reach of the yagi by ~15 dB"; measured, it is 20.  RF25's Enhanced layer is not a decoder
+problem on this antenna; it is a link problem, and the Philips -- where the gain table calls
+RF25 strong -- is the test, on the box that has the radio.
+
+**D. `gate_e107_ldpc.py` on the RF33 bank: PASS.**  Flooding 22,890 ms, layered 12,428 (1.8x),
+layered+abort 6,600 (1.88x over layered); no net loss at any level, every shared Block
+byte-identical, deterministic; the abort loses no Block at any level.  With the ABI-4 kernel.
+
+**E. Layouts.**
+
+| layout | x rt | converged / total | lanes vs 2x4 | worker_fec (sum) | w_fec_ldpc (sum) | park_wait (sum) |
+|---|---|---|---|---|---|---|
+| 2x4 | 0.451 | 1916 / 5719 | reference | 780 | 658 | 24 |
+| 3x2 | 0.471 | 1916 / 5719 | 4/4 byte-identical | 1171 | 992 | 147 |
+| 5x1 | 0.466 | 1916 / 5719 | 4/4 byte-identical | 1959 | 1679 | 502 |
+
+Identical Blocks and bytes at every layout (E123 holds; 13.16's sweep is finally a
+measurement), and the rate does not move: 0.45-0.47x.  The summed worker timers grow with the
+worker count -- LDPC 658 -> 992 -> 1679, park 24 -> 502 -- while the output and the rate stay
+put: that is contention on six cores (five single-thread workers plus the parent) inflating
+each worker's LDPC, 13.20's finding at P=24 in miniature.  Main thread at 5x1: pool_wait 384,
+fec_dispatch 228, cti_gather 33.
+
+**Where this box stands.**  0.451x and 1916 Blocks on the marginal capture, every byte
+layout-independent, the Core at 2 dB and the Enhanced layer 20 dB away.  The pool is 79% FEC;
+the LDPC's 650-plus ms a Frame at 27% convergence is the ladder paying three aborts per
+hopeless Block, and the two-level abort named in A is the next lever that reaches this box.
+The cell bank for sizing it is on disk (`~/captures/cells_rf25`, 141 MB), now with a real
+per-Block BCH flag for the next one written.
+
+### 13.22 The 32-core box, second session: the Enhanced layer closed as a link, E125 sized and built (2026-11-07 night)
+
+Pulled to 096d030 (13.21's two Python fixes; no kernel change, the ABI-4 layered library
+loads with the pack entry point).  `OPENBLAS_NUM_THREADS=1`, `ATSC3_LDPC_BOXPLUS=1`.
+
+**Part 1 -- the Enhanced layer, E69's way, on the strong RF25 (`rf25_win_45s_b.cs16`, 80% of
+blocks as recorded).**  `ATSC3_FEC_CELL_DUMP` every 10th batch at 8 x 2 (the replay itself
+1.143x, 4848/5986 -- E123's bytes), 22 batches, **736 Blocks, 679 BCH-clean and re-encoded**
+(the per-Block flag is real now), fitted |gain| median 0.934, P_core -2.03 dB of the total,
+P_residual -4.28 dB (cancellation gain 4.28 dB), negative control leaves 0.887 of the received
+power (fails to cancel, as required).  **Core-layer SNR 2.25 dB.  Enhanced-layer SNR -6.95 dB
+against 12.5: margin -19.45 dB, SHORT.**  Against 13.21's marginal capture (2.05 dB, -7.19,
+-19.7): the two captures that look so different to the FEC -- 80% against 27% of blocks --
+sit 0.2 dB apart, because QPSK 9/15's cliff is that steep, and both are 19-20 dB from the
+Enhanced layer.  That is the effective SNR the decoder sees (the residual carries the
+equaliser's own error too), and it is the number that matters.
+
+The other antenna could not be measured: the RSPdx has been streaming at half rate since an
+SDRplay API service restart earlier in the evening (45 s of samples in 90 s of wall, 0 overflows,
+the capture tool's integrity law marks it VOID), and by the time of the port probe it answered
+"no sdrplay device found" on two of the three ports and delivered 0 bytes on the third.  Device
+and service restarts from software did not recover it; it needs a USB replug.  **So the one
+number the question wanted is half-answered: on the yagi, both RF25 captures put the Enhanced
+layer ~19.5 dB out of reach, and that is a link problem, not a decoder problem.  The Philips
+measurement is one 45 s bank and one replay away once the radio is replugged; until it is
+done, nothing gets built for the Enhanced layer.**
+
+**Part 2 -- E125, sized first.**  13.21 asked for a two-level abort: drop the hopeless Blocks
+(flat at ~0.39 x nc) after rung 1 instead of re-aborting them on rungs 2 and 3.
+`lab/size_ldpc_abort2.py` re-assembles the ladders from the per-call record (rung k+1's rows
+are rung k's failing rows) and tags every rung-1 abort with its syndrome and whether any later
+rung converged it.  Two records, both the 12 dB file (the 6-core regime):
+
+* Under M10's ladder (1.0 first; this morning's record, 4,716 Blocks): the populations do NOT
+  separate.  Rung 1 converged nothing; the 958 Blocks rung 2 rescued had rung-1 syndromes
+  9,502-10,404, inside the never-rescued range (p5 9,958, p50 10,211).  Smallest zero-loss T2
+  = 0.405 x nc, saving 1%.  Alpha 1.0 is a bad judge of hopelessness on this code.
+* Under E121's ladder (0.82 first; a fresh record, EVERY=8, 5,285 Blocks, 1,389 converged):
+  **rung 1 converges 1,386 of the 1,389; rungs 2 and 3 cost 42% of all LDPC sweeps (102,503 +
+  31,253 of 321,556) and converge 3 Blocks -- each of which rung 1 had left at a syndrome of
+  2.**  The 533 rung-1 aborts (>= 0.36 nc) are never rescued, but dropping them saves only
+  2.7%: the cost is not the hopeless Blocks, it is the 3,366 NEAR MISSES below the abort
+  threshold (final syndrome p5/p50/p95 = 259 / 8,766 / 9,451 after 50 sweeps) that climb to
+  rungs 2 and 3 and never converge there either.
+
+So E125 is not the kernel's second abort threshold; it is a gate on the LADDER, in Python,
+no ABI change: a Block climbs to the next rung only if the rung it failed left it close --
+final syndrome under LADDER_NEAR x nc (`ATSC3_LDPC_LADDER_NEAR`).  At 0.02 x nc (518) the
+record retries 220 of the 3,366 near misses and all 3 rescues (syndrome 2); the hopeless
+abort is a subset.  **Gated under both laws.**  `gate_e121_ladder.py` (now with the `near` variants, the E121 ladder
+as the reference, bits on shared Blocks compared) on three LLR records -- the 12 dB E121-ladder
+record (605 Blocks), the as-recorded E121-ladder record (948) and 13.20's as-recorded record (773):
+near 0.02 loses **0** Blocks on all three, bits identical on every shared Block, **35% / 22% / 23%
+fewer vector-sweeps**; near 0.10 and 0.05 are the same; the hopeless-only rule (near 0.36) saves
+3-4%; M10's ladder loses 64 / 15 / 3 against E121's.  `gate_e107_ldpc.py` PASS.  **Replay at
+8 x 2: the 12 dB file 0.679 -> 0.950x (+40%) with the converged count 1,389/5,250 and the lanes
+byte-identical; as recorded 1.143 -> 1.322x (+16%), 4,848/5,986, lanes identical**; LDPC summed over
+the workers 1,545 -> 958 and 969 -> 781 ms a Frame.  Default ON at 0.02 (`ATSC3_LDPC_LADDER_NEAR=0`
+restores E121 as shipped).  For the 6-core box this is the lever 13.21 asked for, in a form its
+data agrees with: at 27% convergence its 658 ms of LDPC a Frame should drop by about the same
+40%, before any pool restructuring.
+
+**Part 3 -- the worker split, sized, not built.**  `LdmDemodPool` has one job queue and one
+worker type; each worker's `nth` threads serve both its demod (a ThreadPoolExecutor the
+FrameDemod shares) and its FEC batch.  Both boxes measured the price: the demod runs at
+202-243 ms inside a worker against 103-132 standalone, and a demod job waits 850-1,400 ms
+(summed) behind FEC batches.  The arithmetic for the 6-core box on the marginal capture, per
+242.5 ms Frame: demod 103 ms single-process at 2 threads; FEC 780 ms a batch at 4 threads
+(LDPC 658), ~470 with E125 at 0.02 (the later rungs gone, 42% of sweeps); the serial main
+thread 110 (front end 31, cti_gather 28, probing fec 48, l1 1).  With 1 demod process x 2
+threads and 2 FEC processes x 2 threads, the pipeline's slowest stage would be the FEC at
+~235-300 ms a Frame (two batches in flight), i.e. **~0.8-1.0x where it is 0.45x today**, on
+3-4 of the box's 6 cores, with the demod back to its standalone cost because nothing shares its
+process.  Without E125 the same split is FEC-bound at ~390 ms = 0.6x.  The build is a second
+job kind on a second queue (FEC-only workers take only "fec", demod-only take only "demod"),
+`--ldm-fec-procs`, and the E117 timers already measure every piece of it; it is the next
+session's work, after the E125 default is settled on both boxes.
+
+### 13.23 The 6-core box with E125 (2026-11-07 night, Omarchy, Ryzen 1600X 6c/12t)
+
+Pulled to 61f751b on the 13.21 clone and venv; no kernel source changed since 13.21 (the
+diff is PRIOR_ART, gate_e121_ladder, m44_ldm, size_ldpc_abort2), so nothing was rebuilt --
+verified once: the layered library loads at ABI 4 and all seven `.so` are present.  Radio on
+the other box; lossless replay of `rf25_marginal_45s.cs16`.  `OPENBLAS_NUM_THREADS=1`,
+`ATSC3_LDPC_BOXPLUS=1`.  The question: what E125 does to the marginal capture on six cores,
+where 13.21 measured 0.451x / 1916 Blocks with the LDPC at 658 ms a Frame summed over the
+workers, 79% of the pool.
+
+**A and B -- E125 on and off, 2x4, same session, same box.**
+
+| | E125 off (`LADDER_NEAR=0`) | **E125 on (default)** | |
+|---|---|---|---|
+| x real time | 0.451 | **0.601** | **+33%** |
+| converged / total | 1916 / 5719 | **1916 / 5719** | identical |
+| lanes | reference | **4 of 4 byte-identical** | |
+| LDPC, summed over workers | 656 | **430** | -34% |
+| worker_fec / worker_demod (summed) | 780 / 203 | 552 / 196 | pool 79% -> 74% FEC |
+| main thread: pool_wait + fec_dispatch | 449 + 266 | 337 + 161 | waiting 716 -> 498 |
+| HEADROOM (slowest stage) | 0.28x | 0.40x | |
+
+B reproduces 13.21 to the digit (0.451x, 1916/5719, LDPC 656 vs 658; `ldm.stats` identical:
+l1_verified 10, lock_lost 1, reacquired_from_window 8, phase_rejected 8 + 20 range,
+pre_floor_skipped 3) -- E123 holds across sessions -- and A changes no byte of the output.
+The rest of A's pool line: worker_qwait 1043, fec_worker_qwait 851, out_q_latency 29,
+park_wait 20, submit_copy 6; demod stages in the worker cpe 89, equalise 49, fft 48,
+ce_smooth 23 (= the 196); main thread fec 33 (fec_ldpc 25), cti_gather 28, l1 1.4.  What
+E125 removed is exactly what 13.22 said it would: the later rungs' sweeps on near misses that
+never converge.  The demod is untouched (196 vs 203) and still twice its standalone cost
+inside a worker that shares the process with FEC -- the worker split's argument, intact.
+
+**C. `gate_e123_relock.py --layouts 2x4,2x4,4x1,5x1`, E125 on: PASS.**  0.601 / 0.596 /
+0.615 / 0.641x; 1916/5719 at every layout, lanes byte-identical, final lock origin 164 start_row
+198 everywhere, anchor never behind, lag-wait 0.
+
+**D. The ladder's own law on this box's Blocks.**  Record with E125 OFF (every 8th call keeps
+its LLRs): 505 calls, 446 MB, re-assembled into 176 ladders (0.82, 0.85, 1.0) over 5,824
+Blocks.  `size_ldpc_abort2.py` and the companion written here, `lab/size_ldpc_rungs.py`
+(the same re-assembly; it prints the per-rung sweeps and the rung-1 syndrome of every rescued
+Block, which the first tool reports only for rescued aborts):
+
+* Blocks entering each rung 5,824 / 3,990 / 3,908; **converged per rung 1,834 / 82 / 0** --
+  rung 3 converges nothing on this capture.  **Lane-sweeps per rung 227,115 / 132,249 /
+  31,441 = 58.1% / 33.8% / 8.0%: rungs 2 and 3 are 41.9% of all LDPC sweeps**, 13.22's 42%
+  to the point.
+* **The 82 Blocks a later rung rescued had rung-1 final syndromes min / p50 / p95 / max =
+  1 / 2 / 4 / 49** (0.0019 x nc at the top): **none at or above 518 = 0.02 x nc.**  E125 loses
+  nothing here, with a tenfold margin under its gate; 13.22's records topped out at 20.  Of
+  the 3,908 failures never rescued (p5/p50/p95 = 64 / 8,605 / 9,427), 369 lie below the gate
+  and are still retried -- so E125 retries 451 of 3,990 rung-1 failures and skips 3,539.
+* The hopeless abort 13.21 proposed: 148 rung-1 aborts (>= 0.36 nc; p5/p50/p95 9,335 /
+  9,401 / 9,581), 0 ever rescued, smallest zero-loss T2 = 0.36 x nc saving 2,408 lane-sweeps
+  = **0.6%**.  Dead on this box too, as 13.22 found; the cost was never the hopeless Blocks.
+* `gate_e121_ladder.py --threads 4` on 25 first-rung batches, 774 Blocks (rate 9/15, corr 1,
+  abort 8,0.36,0):
+
+| variant | conv | lost | gain | vec-sweeps | vs ship | shared bits differ |
+|---|---|---|---|---|---|---|
+| E121 ship (0.82, 0.85, 1.0) | 314 | 0 | 0 | 8,999 | -- | 0 |
+| M10 (1.0, 0.85, 0.75) | 283 | **31** | 0 | 9,433 | -5% | 0 |
+| E121 + near 0.36 | 314 | 0 | 0 | 8,573 | 5% fewer | 0 |
+| E121 + near 0.10 / 0.05 | 314 | 0 | 0 | 6,047 | 33% fewer | 0 |
+| **E121 + near 0.02 (shipped)** | **314** | **0** | 0 | **5,947** | **34% fewer** | **0** |
+| E121 + near 0.01 | 314 | 0 | 0 | 5,889 | 35% fewer | 0 |
+| 0.82 only | 301 | 13 | 0 | 5,142 | 43% fewer | 0 |
+
+Near 0.02 loses 0 against the E121 ladder with bits identical on every shared Block and 34%
+fewer vector-sweeps (13.22: 35 / 22 / 23% on its three records); M10's ladder would lose 31
+Blocks of 314 here, 0.82-only 13.
+
+**E. Layouts, E125 on.**  3x2 **0.643x**, 5x1 **0.641x**, both 1916/5719 with lanes byte-identical
+to 2x4.  With the LDPC smaller the layout now matters a little (+7%; pool_wait 337 -> 287 -> 250),
+where 13.21 saw +4%; 3x2 is this box's layout for now.
+
+**Where this box stands.**  0.60-0.64x on the marginal capture, +33-43% over 13.21 for a
+Python gate on the ladder that changes no byte and is now gated on this box's own record.
+The pool is 74% FEC at 552 ms summed; the demod is 196 in-worker against 103 standalone;
+the main thread waits 498 of 603.  Every number 13.22's Part 3 arithmetic used for the worker
+split is now measured here with E125 in place (FEC ~550 summed at 2 x 4 threads, demod 103
+standalone, serial main thread ~95), and that split -- demod-only and FEC-only processes on
+their own queues, `--ldm-fec-procs` -- is the next lever on this box, with 13.22's estimate of
+0.8-1.0x to be measured, not assumed.  The LDPC record for sizing it is on disk
+(`~/captures/ldpc_marginal_e121`, 446 MB).
+
+### 13.24 The 6-core box, night: the radio was here; both antennas measured; the worker split (2026-11-07)
+
+**Where the radio is.**  The 13.22 handoff said "the radio is on the other box".  `lsusb` and
+SoapySDR on this box: RSPdx 230204CB48, plugged in HERE.  The half-rate / "no device" fault
+13.22 fought was that box's USB or API state, not this radio's: both banks below streamed 45.0 s
+of samples in 45.0 s of wall, 0 overflows, no clipping (the capture tool's integrity law).  And
+`tools/atsc3_capture.py`'s own help says `--biast` powers "the Antenna B bias-T (yagi LNA)",
+so Antenna B is the yagi with its LNA; the morning's note had the labels the other way round.
+Neither label decided anything below -- the measurement did.
+
+**Part 1 -- RF25 on both antennas, E69's way.**  Banked tonight, 45 s each, IFGR 32, rfgain_sel 2:
+Antenna B with the bias-T on, max|s| 4,004 = -18.3 dBFS; Antenna A without, max|s| 17,348 =
+**-5.5 dBFS** -- some 13 dB more raw RF25 at the ADC on A, even against B's LNA.  Lossless replay
+at this box's 3x2 (E125 on), `ATSC3_FEC_CELL_DUMP` every 10th batch, `e124_ldm_snr --inj 10
+--need 12.5` (the carrier signals `PLP1(L1 256QAM 7/15 inj10)`, so 10 is the right injection;
+it also carries PLP16, QPSK 2/15, core layer):
+
+| capture | convergence | x rt at 3x2 | Core-layer SNR | Enhanced SNR | margin vs 12.5 | control |
+|---|---|---|---|---|---|---|
+| 13.21 marginal (afternoon, B) | 27% (1916/5719) | 0.643 | 2.05 dB | -7.19 | -19.7 | 0.888 |
+| 13.22 strong (32-core's bank) | 80% | -- | 2.25 dB | -6.95 | -19.45 | 0.887 |
+| **tonight, Antenna B** | **99.5% (6371/6403)** | **1.136** | **2.72 dB** | -6.38 | -18.88 | 0.890 |
+| **tonight, Antenna A** | **100% (6402/6402)** | **1.391** | **3.40 dB** | -5.52 | -18.02 | 0.875 |
+
+Two results.  First, **the LDM carrier runs in real time on this six-core box when the air is
+good**: 1.136x and 1.391x at 3x2 with every lane written and every block converged -- the
+afternoon's 0.64x was the air, not the decoder, and the marginal capture stays the stress case.
+Second, the Enhanced layer is 18-20 dB short on every antenna and every capture -- but the
+table's spread is the finding.  The Core-layer SNR as E124 measures it (P_core over the
+residual after a perfect re-encode cancellation, i.e. the SNR the Core's demapper experiences,
+Enhanced interference included) rises only **2.05 -> 3.40 dB across 27% -> 100% convergence**,
+and **13 dB more signal on Antenna A buys 0.7 dB of it**.  The residual is therefore not
+thermal noise.  It is a **signal-proportional impairment** -- channel-estimate error, phase
+noise, residual multipath, in some mix -- that caps the effective SNR near 3.4 dB however much
+antenna is added; the numbers are coherent (a QPSK 9/15 Core including a -10 dB layer as
+interference does decode at 2.7-3.4 dB, and fails at 2.05), and the control fails to cancel every
+time, so the method is honest about what it sees.  13.22 called the Enhanced layer "a link
+problem, not a decoder problem"; the four-capture series says the opposite half: **more antenna
+cannot reach it, because the floor scales with the signal; a better estimator might.**  E122's
+round trip cancelled perfectly with the true channel; on air the channel estimate's error is in
+the residual.  The next step for the Enhanced layer is therefore receiver-side and testable: the
+residual against channel-estimate quality (E104's comb estimate on and off, E60's smoothing), and
+the round trip re-run with a modelled estimation error, to see how much of the 18 dB is ours.
+Until then nothing gets built for the Enhanced layer -- but the reason has changed.
+
+**Part 2 -- E126, the worker split, built and refereed.**  `LdmDemodPool` gains FEC-only
+processes on their own queue (`--ldm-fec-procs N`, `--ldm-fec-proc-threads`); the demod workers
+then take only demod jobs.  With N = 0 the FEC queue IS the demod queue and every worker has
+role "both" -- today's pool, byte for byte.  `gate_e123_relock` accepts "PxT+FxG".  Committed
+(efc1a07) before the first run.
+
+*Identity (the marginal capture, `--layouts 3x2,1x2+2x2,2x2+2x2,1x2+3x1`): PASS* -- 1916/5719 at
+every layout, lanes byte-identical, final lock origin 164 / start_row 198 everywhere, anchor
+never behind.  `gate_e107` PASS (the RF33 path never touches the pool).  Strong-bank lanes
+identical too.  The split changes no byte.
+
+*Throughput, marginal capture (E117 timers summed over workers, ms per Frame):*
+
+| layout | x rt | worker_demod | worker_fec (ldpc) | demod qwait | fec qwait | park_wait | HEADROOM |
+|---|---|---|---|---|---|---|---|
+| **3x2** (single kind) | **0.634** | 220 | 809 (630) | 1027 | 766 | 97 | 0.42x |
+| 1x2+2x2 | 0.600 | 210 | 708 (539) | 449 | 1023 | 285 | 0.35x |
+| 2x2+2x2 | 0.565 | 281 | 747 (582) | 272 | 1463 | 686 | 0.33x |
+| 1x2+3x1 | 0.555 | 189 | 1149 (875) | 458 | 1120 | 594 | 0.32x |
+
+*Strong Antenna-A bank:* 3x2 **1.398x** (worker_demod 176, worker_fec 319, fec qwait 449) against
+1x2+2x2 1.311x (176, 317, fec qwait 60, demod qwait 563 -> 661): with one demod process the demod
+becomes the cap (176 ms a Frame in one process is 1.37x at most).
+
+**The split loses on this box -- 5% marginal, 6% strong -- and the timers say why, which is the
+result.**  13.22 Part 3's premise was that the demod runs at ~200 ms inside a worker because it
+shares the process with FEC, and would return to its ~103 ms standalone cost on its own.  It did
+not: **210 ms in a process with no FEC in it** (220 with; 176-189 elsewhere), against 103
+standalone.  The inflation is box-level contention -- six or eight worker threads plus the
+parent and the front end on six cores -- not intra-process sharing; the hypothesis is
+falsified.  And on the marginal capture the split takes threads away from the stage that is
+actually short of them: FEC is the pool's bulk (809 of 1,029 summed), the FEC queue wait rises
+766 -> 1023, and the single demod worker's output parks (97 -> 285) waiting for a parent that is
+waiting for FEC.  **Decision: `--ldm-fec-procs 0` stays the default and 3x2 stays this box's
+layout.**  The split is kept, off and bit-identical, for the 32-core box, where cores are not
+scarce and the FEC dispatch wait -- not contention -- was the pool's cost; that is its test, not
+this box's.
+
+**Where this box stands tonight.**  A strong LDM carrier decodes in real time here -- 1.14x and
+1.40x at 3x2 on tonight's two banks, every block, every lane -- so the live-TV goal is met for
+RF25 when the air is good, on six cores, with every lever gated and every byte accounted for.
+The marginal capture is at 0.634x (0.309x this morning), its remaining cost the FEC of a Core at
+its cliff, and the next lever there is FEC work, not layout.  The Enhanced layer is capped by a
+signal-proportional impairment that a better estimator, not a better antenna, would have to
+move (Part 1).  Banks on disk for all of it: `rf25_antA_45s.cs16`, `rf25_antB_45s.cs16`,
+`cells_rf25_antA/B`, `ldpc_marginal_e121`.
+
+**Live, this box, 21:31 (Antenna A, no bias-T, rfgain_sel 2 / IFGR 32, 3x2, 90 s, `--player none`).**
+One sample-continuity break in the first 0.3 s (the reader racing the pool's 8 s warm-up; it
+re-acquired the bootstrap unaided), lock at 5.3 s, one E115 re-acquisition at 10 s, re-locked
+with 35/35 Blocks BCH-clean -- and then **1.00x real time sustained to the end: 371 Frames,
+11,653/12,492 Blocks (93%, the deficit being the ten seconds before lock), 0 Frames shed, 0 SDR
+overflow reads, all four lanes written (video 29.5 MB, audio 1.05 + 0.59 MB, captions 126 KB)**,
+instantaneous rate 1.01-1.02x, locked on 17 of 18 status lines.  The main thread's decode is
+37 ms a Frame; the pool carries the rest; live is capped at 1.0x by the air.  **The six-core
+box does live LDM television on a strong night**, at the edge of real time with nothing shed;
+13.18's live run on the same carrier this morning was 0.32x with 246 Frames shed, on marginal
+air and before E111-E125.  The 32-core box does the same with headroom (13.20: WJLA seven
+minutes, 0 drops).  So the radio question is about margin, not capability: for watching, the
+box with headroom; for this box, whose remaining work -- the marginal capture's FEC and the
+Enhanced layer's estimator -- is replay on banks already here, the radio is not needed.
+
+### 13.25 The 32-core box, third session: the radio back here, E126 refereed where it was aimed, the Enhanced layer's "impairment" named (2026-11-08)
+
+Pulled to 477e791 (13.23, 13.24, E126); no kernel source changed since the 13.20 build, so nothing
+was rebuilt -- verified once: the layered library loads at ABI 4 with the pack entry point and all
+seven DLLs load.  `OPENBLAS_NUM_THREADS=1`, `ATSC3_LDPC_BOXPLUS=1`, every run.
+
+**Step 0 -- the radio.**  The RSPdx enumerated (`SDRplay Dev0 RSPdx 230204CB48`), opened, took its
+settings and read them back -- and streamed NOTHING: every `readStream` returned -1 (timeout) for
+the whole 110 s of the first attempt, 0 samples.  So 13.22's fault was never the unit (13.24 proved
+that) and not the USB port either: one `Restart-Service SDRplayAPIService` (it works without
+elevation; stopping the service's process directly is denied) and the next probe streamed 5.00 s in
+4.99 s.  What it took: one service restart, no replug, no port change.  Then the two banks, 45 s
+each at IFGR 32 / rfgain_sel 2, both **45.01 s of samples in 44.99 s of wall, 0 overflows, no
+clipping, USABLE**: `rf25_s3_antB.cs16` (bias-T on, max|s| 4,093 = -18.1 dBFS) and
+`rf25_s3_antA.cs16` (bias-T off, 4,626 = -17.0 dBFS).  **Here the two ports are within 1 dB of
+each other at the ADC**, where the 6-core box saw 13 dB between them (13.24); so the antennas are
+not wired the same way at the two desks, or not the same antennas -- kept both, decided nothing by
+the label.  Replayed at 8 x 2 (E125 on): Antenna A **2.001x, 6,436/6,437**; Antenna B **2.142x,
+6,438/6,438**.  Both banks decode every Block; B is the stronger by E124 (below) and is the bank
+the Part B table was built on.
+
+**Part A -- E126 on the box it was aimed at.**  `gate_e123_relock.py --layouts
+8x2,4x2+4x2,6x2+6x2,2x2+8x2`, on the 12 dB file and on the as-recorded strong file (13.22's bank):
+
+*Identity: PASS on both.*  12 dB: 1,389/5,250 at every layout, lanes byte-identical, final lock
+cold / origin 80 / start_row 676 everywhere, anchor never behind, 0 stalls.  As recorded:
+4,848/5,986, locked / origin 74 / start_row 344, lanes identical (video 10,102,507 bytes at all
+four).  The split changes no byte here either.  (One stat does move: `reacquired_from_window` is
+19 at 4x2+4x2 against 20 at the other three on the 12 dB file -- a held-window re-acquisition
+that happened one Frame later as a live read; the counts and bytes are the referee and they agree.)
+
+*Throughput, E117 timers summed over workers, ms per Frame; main thread's own waits at the right:*
+
+| file | layout | x rt | worker_demod | worker_fec (ldpc) | demod qwait | fec qwait | park / fec park | main: pool_wait | fec_dispatch |
+|---|---|---|---|---|---|---|---|---|---|
+| 12 dB | **8x2** | **0.935** | 310 | 1,142 (996) | 507 | 282 | 365 / 169 | 143 | 57 |
+| 12 dB | 4x2+4x2 | 0.822 | 327 | 814 (674) | 187 | 1,135 | 708 / 42 | 175 | 121 |
+| 12 dB | 6x2+6x2 | 0.933 | 432 | 1,004 (847) | 91 | 572 | 584 / 104 | 0 | 3 |
+| 12 dB | 2x2+8x2 | 0.946 | 294 | 1,214 (1,051) | 741 | 251 | 298 / 111 | 94 | 3 |
+| strong | **8x2** | **1.314** | 297 | 946 (758) | 437 | 184 | 203 / 275 | 128 | 17 |
+| strong | 4x2+4x2 | 1.160 | 294 | 722 (537) | 196 | 1,009 | 476 / 73 | 149 | 85 |
+| strong | 6x2+6x2 | 1.320 | 432 | 914 (722) | 209 | 449 | 540 / 150 | 71 | 3 |
+| strong | 2x2+8x2 | 1.342 | 280 | 1,003 (831) | 1,024 | 89 | 252 / 217 | 145 | 3 |
+
+Run-to-run on the strong file, same session: 8x2 again **1.332x**, 2x2+8x2 again **1.351x**, 4,848/5,986 and the lanes identical both times
+(13.22 measured 8x2 at 1.322 and 0.950 on these files).  The two questions, answered by the
+timers:
+
+* **Does `worker_demod` fall toward its standalone ~132 ms when no FEC shares the process?  No.**
+  280-327 ms with 2-4 demod-only processes, **432 with 6** -- it rises with the number of
+  processes in the box, exactly as on six cores (13.24: 210 with no FEC in the process).  On 32
+  cores and 64 threads that is not a shortage of cores; the Frame demod (an 8K FFT over 189
+  symbols, the pilot grid, the equaliser over 1.2 M cells) is memory-bound, and twelve processes
+  doing it and the LDPC at once share one memory system.  The inflation is box-level contention
+  on both boxes; the split's premise is falsified here too.
+* **Does the demod queue wait collapse?  Only by moving.**  With 4 demod + 4 FEC processes the
+  demod jobs wait 187-196 ms instead of 437-507 -- and the FEC jobs then wait 1,009-1,135 instead
+  of 184-282, the parent's `fec_dispatch` rises 57 -> 121 and the output parks 365 -> 708.  With
+  2 demod + 8 FEC the FEC waits vanish (89-251) and the two demod workers queue 741-1,024 ms.
+  The main thread's `fec_dispatch` does collapse to 3 ms in every split with >= 6 FEC processes
+  -- 13.20's "pool cost" -- and the throughput does not follow, because the parent then waits in
+  `pool_wait` instead (94-145 ms): the dispatch wait was a symptom of the pool's total rate, not
+  its cause.
+
+**Decision: `--ldm-fec-procs` stays 0 and the ncpu ladder does not set it.**  The best split
+(2x2+8x2) is +1.2% / +2.1% over 8x2 on the two files, inside the run-to-run spread (13.22 to
+today: 0.950 -> 0.935, 1.322 -> 1.314 at 8x2); 4x2+4x2 loses 12%.  The split is kept, off and
+bit-identical, as 13.24 left it; its test is done on both boxes and it does not pay on either.
+What would: fewer, fatter demod processes (the inflation is per process) and the LDPC itself,
+which is 75-85% of every worker-second on every layout above.
+
+**Part B -- the Enhanced layer's "impairment", measured, and what it turned out to be.**
+
+*The brief's table first.*  13.24 asked whether the residual after a perfect Core cancellation
+moves with the channel estimator.  Two of the four named levers do not exist on this path:
+`ATSC3_CE_COMB` and `ATSC3_MARGIN` are read by `m16_margin` / `m9_fast` (the RF33 chain); the LDM
+`FrameDemod` has its own smoother (`_ce_smooth`, E86c) with its own knobs, `ATSC3_LDM_CE_W` (the
+boxcar half-width in symbols, 12; 0 = per-symbol estimates, no smoothing), `ATSC3_LDM_CE_NORM`
+(the per-symbol complex gain divided out before the boxcar), `_CE_DETECT`, `_CE_ABS`.  So the
+table runs the brief's two (expecting no-ops, and proving it by bytes) and the path's own.
+Antenna B's fresh bank, 8 x 2, `ATSC3_FEC_CELL_DUMP` every 10th batch, E124 on 807-842 BCH-clean
+Blocks per run, everything else identical:
+
+| setting | x rt | converged | lanes vs default | fitted gain | P_res / P_core | Core-layer SNR | negative control |
+|---|---|---|---|---|---|---|---|
+| **default** (CE_W 12, NORM on) | 2.142 | 6438/6438 | -- | 0.9628 | 0.4446 | **3.52 dB** | 0.875 |
+| `ATSC3_LDM_CE_W=0` (no smoothing) | 2.065 | 6436/6438 | differ (2 Blocks) | 0.9603 | 0.4769 | 3.22 | 0.878 |
+| `ATSC3_LDM_CE_W=4` | 2.093 | 6436/6438 | identical | 0.9620 | 0.4538 | 3.43 | 0.876 |
+| `ATSC3_LDM_CE_W=24` | 2.168 | 6438/6438 | identical | 0.9630 | 0.4436 | 3.53 | 0.875 |
+| `ATSC3_LDM_CE_NORM=0` | 2.146 | 6438/6438 | identical | 0.9627 | 0.4456 | 3.51 | 0.875 |
+| `ATSC3_CE_COMB=1` | 2.143 | 6438/6438 | identical | 0.9627 | 0.4453 | 3.51 | 0.875 |
+| `ATSC3_CE_COMB=0` | 2.142 | 6438/6438 | identical | 0.9627 | 0.4453 | 3.51 | 0.875 |
+| `ATSC3_MARGIN=0` | 2.146 | 6438/6438 | identical | 0.9627 | 0.4458 | 3.51 | 0.875 |
+
+**Flat: every lever leaves the Core-layer SNR within 3.51-3.53 dB; the only ones that move it,
+move it DOWN (less smoothing, -0.1 and -0.3 dB).**  The brief's two are byte-identical no-ops on
+the LDM path, as expected.  The estimator is not where the 18 dB were.
+
+*So the structure of the residual instead* -- `lab/e124_residual.py`, on the same banks: the
+residual projected on the Core symbol has Var(Im)/Var(Re) = **1.002** (1.014 on 13.22's bank;
+a phase error would be >> 1, a gain error << 1); re-fitting the gain per segment of the Block
+removes **3.2% at 1,024 segments = exactly the white expectation** (0.0-0.8% below that); kurtosis
+**3.02 / 3.02** (Gaussian 3.0); P_res against P_core across Blocks has no positive slope.  The
+residual is isotropic, white, Gaussian and signal-proportional.  That is not an estimator's
+signature, nor phase noise, nor multipath.  It is the signature of an independent Gaussian-like
+layer riding on the Core -- **which is what the Enhanced layer is** (256QAM-NUC, 8,100 cells a
+Block, spread by the CTI).
+
+*And the pilots' own view* -- `ATSC3_LDM_CE_DUMP` (every 20th Frame's raw scattered-pilot grid,
+per-symbol gains, smoothed grid, pilot noise floor) and `lab/e127_ce_probe.py`: the carrier is
+**8K, SP12_4** (grid of 553 points at dx 12, 140 of them per data symbol, unambiguous delay span
+Tu/dx = 98.8 us); the impulse response from each symbol's grid puts **87-93% of the power within
+1 us of the FFT window start, 5-11% at 1-5 us, < 1% before the window, 2% beyond +-25 us**;
+the equaliser's linear interpolation between grid points against the DFT interpolant of the same
+grid is **-29.2 / -29.6 dB** relative to the channel (A / B) -- the interpolation is not the loss
+either; and the **pilot-estimate SNR is 14.0-14.7 dB (A) and 15.5-16.5 dB (B)**, second
+differences and raw-minus-smoothed agreeing within 0.9 dB (the scattered-pilot boost is in that
+number; the data cells see it less the boost).  A channel this benign, pilots this clean, and a
+Core "SNR" of 3.5 dB on the data cells.
+
+**The answer: the injection level.**  `L1D_plp_ldm_injection_level` is a 5-bit INDEX in 0.5 dB
+steps (A/331): RF25 signals **index 10 = 5.0 dB**, and the repo always knew it -- `m14_budget.py`
+("injection level 5.0 dB SIGNALLED in L1-Detail"), `e58_m15_sp.py`, `e69_ldm.py` ("index 8 ->
+4.0 dB" for RF30).  The LDM plan's `describe()` printed the raw index, `inj10`, and E122 (the
+round trip's RF25 config), E124 (`--inj 10`) and every Enhanced-layer margin in 13.20-13.24 took
+it as 10 dB -- an Enhanced layer at a tenth of its real power.  Re-read with the signalled 5.0 dB,
+nothing else changed:
+
+| capture | P_res / P_core | Core-layer SNR (unchanged) | Enhanced share 10^(-0.5) | **noise = P_res - P_enh** | **Core vs noise** | **Enhanced own SNR** | margin vs 12.5 |
+|---|---|---|---|---|---|---|---|
+| 13.22 strong (80%) | 0.596 | 2.25 dB | 0.316 | 0.280 | 5.5 dB | **0.5 dB** | -12.0 |
+| tonight A (100%) | 0.490 | 3.10 | 0.316 | 0.173 | 7.6 dB | **2.6 dB** | -9.9 |
+| tonight B (100%) | 0.4446 | 3.52 | 0.316 | 0.129 | **8.9 dB** | **3.9 dB** | **-8.6** |
+
+**The "signal-proportional impairment that no antenna can move" (13.24) is the Enhanced layer at
+its signalled level: 0.316 of the Core's power, 71% of the residual on the best bank.**  The
+Core-layer SNR is capped at the injection level, 5.0 dB, reachable only as N -> 0 -- `m14_budget`
+said exactly this in words ("a hard ceiling on Core-layer SINR") -- and the four-capture series
+2.05 -> 3.40 -> 3.52 dB is that ceiling being approached, not an impairment at all.  The part that
+IS noise, 0.13-0.28 of P_core, does fall with antenna (13.22's bank 0.280, tonight's 0.129: 3.4 dB
+of the 13 dB the ADC saw -- the rest went into the ceiling); the residual's isotropic white
+Gaussian structure is the 256QAM layer plus that noise; and the pilots' 14-16 dB is consistent
+with a data-cell noise SNR of 8-9 dB once the SP12_4 boost is taken off.  Everything measured
+tonight agrees once the index is read as an index.
+
+*The round trip, re-run at 5.0 dB (`gate_e122_ldm_roundtrip.py --config rf25`, PASS, CONFIGS
+corrected):* the Enhanced layer decodes at Core SNR 18 dB and not at 16 (oracle and real alike),
+so it needs **~17 dB of Core SNR = ~12 dB on its own layer** (the 12.5 of 13.20 was measured at
+the wrong injection and happens to be the same code threshold), and the Core decodes down to 6 dB
+and below.  **Tonight's best bank is 8.6 dB short of the Enhanced layer, not 18-19.7; and the
+shortfall is NOISE, which antenna, LNA and site do move** -- 13.22's "link problem" was the right
+call for the wrong reason, and 13.24's "a better estimator might" was the wrong call for the
+right reason.
+
+*The modelled estimate error, as the brief asked (`--ce-err`; the noiseless synthetic stream
+multiplied cell by cell by (1 + e), e complex Gaussian at a stated power relative to the channel,
+E124's arithmetic on the result):*
+
+| estimate error | P_res / P_core | E124 "Core SNR" | implied Enhanced SNR | Enhanced decodes |
+|---|---|---|---|---|
+| none | 0.3162 | 5.00 dB | unbounded | 47/47 |
+| -30 dB | 0.3114 | 5.07 | unbounded | 47/47 |
+| -20 dB | 0.3230 | 4.91 | 16.7 dB | 47/47 |
+| -15 dB | 0.3507 | 4.55 | 9.6 | **0/47** |
+| -12 dB | 0.3928 | 4.06 | 6.2 | 0/47 |
+| **-10 dB** | **0.4410** | **3.56** | 4.0 | 0/47 |
+| -8 dB | 0.5177 | 2.86 | 2.0 | 0/47 |
+| -6 dB | 0.6377 | 1.95 | -0.1 | 0/47 |
+
+An estimate error of -10 dB relative to the channel would reproduce tonight's P_res/P_core
+(0.4410 against the measured 0.4446) by itself -- that is the budget: the Enhanced layer tolerates
+an estimator no worse than about -17 dB, and everything in the air's residual that is not the
+Enhanced layer is -8.9 dB relative to the Core.  The estimator's share of that is bounded by the
+table above: the levers move the residual by at most 0.3 dB, the interpolation error is -29 dB,
+and the pilots see 14-16 dB.  So the estimator is a minor term in the 8.6 dB; the noise is the
+major one.  **Nothing is built for the Enhanced layer, as the brief required -- but the number to
+beat is now 8.6 dB of noise on the best bank, and the lever is the link again.**  Fixed:
+`m3_spec.ldm_injection_db()`, the plan prints `inj 5.0 dB (idx 10)`, gate_e122's RF25 config,
+`e124_ldm_snr --inj-idx` (default the signalled index).  13.20-13.24's Enhanced-layer margins
+should be read with 9.5 dB added (the arithmetic of the index) and their noise terms recomputed as
+above; their Core-layer SNRs stand.
+
+**Part C -- live LDM television, 90 s, 8 x 2, Antenna A, no bias-T (03:29, `--accel cpu`).**
+The chain refused to start at first: `atsc3_run` / the watch command sit inside a
+"02:10-05:40 meteor window" guard (`ATSC3_METEOR_WINDOW=off` disables it on a box with no meteor
+job) -- so both live runs below carry that variable.  With the viewer (`tools/atsc3_watch_av.py`):
+the chain locked and ran at **0.99-1.00x real time, FEC 10,778/11,653 at 85 s, all four lanes
+written (video 27.5 MB)** -- and the viewer never opened, because the orchestrator waits for
+`live_video_pid12.m4s` (RF33's video PID, hard-coded at `atsc3_watch_av.py:269`) and this
+multiplex's video is PID 5017; it gave up at 120 s with "no video" while the video lane sat
+beside it.  Its chain also ran at `accel=gpu-full` (the `atsc3_run` default), i.e. the GPU LDPC,
+not the kernel path the replays use.  Both are viewer plumbing, not decoder work, and neither
+was fixed on air.  Then once with `--player none` for the record:
+
+| | 13.20 live here (16:35, B, 8x2) | 13.24 live, 6-core (A, 3x2) | **tonight (A, 8x2)** |
+|---|---|---|---|
+| sustained | 0.93x | 1.00x | **0.991x (372 Frames, 90.2 s of air in 91.0 s of wall)** |
+| Blocks | 8,139/11,360 | 11,653/12,492 | **11,686/12,527 (93%)** |
+| Frames shed / SDR overflow reads | 13 / 0 | 0 / 0 | **0 / 0** (raw/frm/bb queues 0/0/0 on every status line) |
+| lock | locked twice, lost twice, E115 x11 | lost once at start, E115 x1 | **one break at 0.3 s (the reader racing the pool's 27 s warm-up), lock lost once at 6 s, E115 re-acquired once (held Frame 39), locked for the remaining 84 s** |
+| lanes | 4 (video 15.3 MB) | 4 (29.5 MB) | **4 (video 28.5 MB, audio 1.05 + 0.57 MB, captions 148 KB)** |
+| main thread per Frame | -- | 37 ms | **62 ms (front end 19, decode 44: cti_gather 31); pool_wait 0.0, fec_dispatch 1.5** |
+| HEADROOM | -- | ~1.0x | **5.58x slowest stage, 3.90x summed** |
+
+The 7% Block deficit is the first ten seconds (warm-up, the break, the re-lock), the same as 13.24;
+after that every status line is `phase locked` with no backlog.  So yes: **this box now holds
+lock and 1.0x with margin** -- 5.6x of it by the slowest stage -- where 13.20 had 0.93x with two
+lock losses and 13 shed Frames; E123 and E125 are the difference, and the air tonight is the same
+Antenna A that banked at -17 dBFS.
+
+**Where this box stands.**  The LDM carrier replays at 2.0-2.1x and runs live at 1.0x with 5.6x of
+headroom; the worker split is refereed on both boxes and stays off; the Enhanced layer is 8.6 dB
+short on the best bank, of NOISE, after the index that put it 18 dB short is read as an index --
+the estimator moves it by 0.3 dB at most and the pilots see 14-16 dB.  Next for the Enhanced
+layer: the link (an outdoor antenna, or the LNA on the port that has the signal), then the
+round trip's 17 dB of Core SNR is the number to bank.  Next for the decoder: the viewer's PID
+plumbing for RF25 (two hard-coded RF33 PIDs), and fewer, fatter demod processes, since the
+demod's cost per process rises with their count on both boxes.
+
+**Addendum, 04:16 -- live LDM television WITH the viewer, on this box.**  "Do it" meant the viewer
+plumbing; three pieces, each refereed on banked lanes before the air saw it:
+
+* `atsc3_watch_av.py` now discovers the lanes from the chain's `live.json` (video = kind "video",
+  the MMTP service the viewer plays, E95; audio PIDs sorted, lowest = the main programme's 5_X
+  element, next = the simulcast pair) instead of RF33's hard-coded `live_video_pid12.m4s` and
+  PIDs 13/14, which is why it gave up beside a 27 MB video lane above.  On air: `lanes: video
+  live_video_pid5017.m4s; audio pid 5018 (5_X), pid 5019 (pair)` 50 s after the chain came up.
+* The main-programme audio worker then died with an IndexError in `m30.synthesise_frames`: RF25's
+  5.1 is ASPX_ACPL_3, a two-channel core plus A-CPL (E77 knew), and `Ac4Stream.decode_frames`
+  narrowed its channel set to L/R on seeing that while the six-channel output lists it had already
+  built kept growing for L/R only, so the grouped filterbank indexed C/Ls/Rs/lfe past their frame
+  counts.  It now drops the channels the stream cannot give, and `atsc3_audio` writes those four
+  silent in the 6-channel wav it opened (the A-CPL upmix is not built).  Referee: RF33's banked
+  pid 13 (540 frames, 0 bad) decodes to a byte-identical wav before and after; RF25's banked pid
+  5018 (2,329 frames) decodes 0 bad where it crashed, L/R rms 3,031 / 2,841, the rest 0.  (The
+  TOC of that lane: 2 substreams, channel_mode 5.1, parsed 2,329/2,329; the fill gate passes on
+  217 of them against 540/540 on RF33's, so the ACPL-3 substream carries bytes the size sum does
+  not account for -- noted, not chased; the frames decode.)
+* The caption worker died five times in ten seconds and was parked: RF25's IMSC1 cues are TTML
+  clock-time with the hours counted from an epoch (`498368:29:28.234`) and `secs()` knew only
+  `12.5s`.  It parses clock-time and the offset suffixes now; main()'s anchor needs one clock
+  across the cues, which either form gives.  Referee: RF33's banked lanes -> the same 7 cues,
+  srt byte-identical; RF25's banked lanes -> 40 documents, 330 raw cues, 15 readable.
+
+**Then 4 minutes of live RF25 with the viewer (Antenna A, `--accel cpu`, 8 x 2, `--cc`):** the
+window opened at 53 s (the pool's warm-up plus the 22 s mux lag), `eng wav: yes 5.1 -> AC-3, spa
+wav: yes, cc anchor: exact`; the mux telemetry logged **28 chunks, 0 dropped, 0 fails, stall 0.0 s,
+player up on every chunk, lag held at 22.0 s**; `live.srt` 316 lines and the soft-subtitle track
+built; no worker died until the run was stopped (the rc=143 lines are the stop).  **Live LDM
+television with picture, sound and captions, off this box, through the viewer, for the first time**
+-- 13.20's live RF25 here had no viewer at all.  Commits 99180e0 (lanes + ACPL-3) and e082a75
+(captions).  Still RF33-shaped and not touched: the `LANG` map's language names (on RF25 "eng" is
+simply the lower PID), and `atsc3_run`'s `accel=gpu-full` default (the runs above passed
+`--accel cpu` through `--chain-extra`).
+
+### 13.26 After the picture: the fix list, worked through (2026-11-08)
+
+The viewer ran on air from 07:15 to 07:32 on Antenna A at 8 x 2 while it was watched ("it's
+playing"): 895 s of mux out, 0 dropped chunks, 0 fails, 0 stalls, lag 22-24 s; the window was
+closed and 13 processes became 0 in 2 s.  Then the list from 13.25's "where it stands", in the
+order it was given, each item refereed on a banked capture before anything went back on air.
+Code: 8a411c6, c31e379, and the commit that carries this section.
+
+**1. Teardown.**  The window-close path was always clean (above).  13.25's two orphaned audio
+workers belonged to the OTHER path: the orchestrator killed from outside (a `timeout` wrapper,
+Task Manager, a closed terminal) -- `TerminateProcess` runs no `finally`, and in the seconds
+before it the supervisor had respawned two workers whose lanes had stopped growing.  Two
+changes in `atsc3_watch_av.py`: every child is assigned to a Windows Job Object with
+`KILL_ON_JOB_CLOSE` (the kernel kills the tree when the orchestrator's handle closes, however
+it closes; Linux gets a SIGTERM handler routed into the same `finally`), and the supervisor
+loop stops when the chain -- the radio's owner -- is gone, respawning nothing during a
+shutdown.  Refereed through the whole stack on the banked RF25 capture (`atsc3_run
+--extra '--capture ...'` under the orchestrator; `atsc3_run` now treats a replay chain exiting
+rc=0 as "replay finished", not a wedge to restart 30 times): lanes found, viewer up, chain at
+end of file -> "the radio owner is gone; shutting down, respawning nothing", 0 processes
+left.  Then `Stop-Process` on the orchestrator itself 38 s into a second replay with 7 children
+alive (chain, `atsc3 watch`, two audio workers, captions, `atsc3_tv`, ffplay): **0 left after
+3 s**.
+
+**2. Language, from the bytes we already had.**  The orchestrator's `LANG` map was RF33's PIDs
+(13 eng, 14 spa) and on RF25 "eng" meant "the lower pid".  The MMTP service names no language
+in anything the chain parsed -- but every lane's init segment carries it in the track's
+`mdhd`: **5018 eng, 5019 spa, 5020 eng** (video `und`).  `m7_play.mdhd_lang` reads it beside
+`mdhd_timescale` (same trak selection); `m11_watch` stores it on the lane and `live.json` says
+it; a ROUTE segment carries its Representation's `@lang` instead; the orchestrator picks the
+`--lang` track by declared language and falls back to pid order only when the lanes are silent
+about it.  RF33 bank replayed: **13 eng, 14 spa, 15 eng** -- the hard-coded map, now derived
+(5994/5994, lane bytes unchanged).  RF25 bank through the orchestrator: `audio pid 5018 (5_X,
+eng), pid 5019 (pair, spa)`.
+
+**3. The stereo that is.**  RF25's "5.1" is ASPX_ACPL_3: a two-channel core plus A-CPL, and
+the A-CPL upmix is not built (TS 103 190-1's parametric coupling; `m28` decodes the core and
+nothing parses the coupling parameters -- a decoder feature, days, not an afternoon).  13.25
+wrote C/Ls/Rs/LFE silent into a 6-channel wav and the viewer encoded a 5.1 AC-3 of four zeros.
+Now the worker's sidecar says how many channels the stream CODES (`channels_coded`), and the
+viewer muxes a 2-coded 6-channel wav as stereo mp2 -- L/R as decoded, not the ITU fold (which,
+with nothing to fold, would only have dropped it 3 dB).  Worker on the banked RF33 lane:
+`channels_coded 6`, 540 frames 0 bad (path unchanged); on the banked RF25 lane:
+`channels_coded 2`, 1283 frames 0 bad.  Orchestrator replay: `eng wav: yes stereo mp2
+(ASPX_ACPL_3 core)`, `eng_ch 2` on every chunk, 0 dropped, 0 fails.
+
+**4. E128 -- fewer, fatter demod processes** (the lever 13.25 left open), strong bank
+(`rf25_win_45s_b`), `gate_e123_relock`, same session, E117 timers in ms per Frame summed over
+workers:
+
+| layout | x rt | worker_demod | worker_fec (ldpc) | demod qwait | fec qwait | main: pool_wait |
+|---|---|---|---|---|---|---|
+| **8x2** | **1.681 / 1.699** | 283 / 287 | 691 (526) / 684 (527) | 353 / 335 | 117 / 118 | 97 / 90 |
+| 6x4 | 1.754 | 255 | 468 (350) | 326 | 190 | 81 |
+| 4x4 | 1.529 | 204 | 379 (262) | 479 | 370 | 122 |
+| 3x8 | 1.470 | 187 | 270 (178) | 469 | 370 | 136 |
+| 2x8 | 1.211 | 159 | 217 (131) | 518 | 452 | 173 |
+
+Identity PASS at every layout (4850/5986, lanes byte-identical, lock identical).  The premise
+holds -- `worker_demod` does fall as processes get fewer, 283 -> 159 ms -- and it does not
+pay: the FEC jobs then queue behind too few processes (fec qwait 117 -> 452) and the Frame rate
+follows the LDPC, not the demod.  6x4 is the one layout above 8x2, by 3-4%, inside the
+run-to-run spread.  **Decision: 8x2 stays the recipe; nothing changes.**  The LDPC is the
+limit on every layout, as 13.25 said.
+
+**5. The night, not the code.**  8x2 on this file read 1.322 (13.22) and 1.314 (13.25); today
+it reads **1.681, 1.699, 1.687, 1.703** across radioconda (numpy 2.2.3) and Python312 (numpy
+2.4.4) -- so it is not the interpreter and not today's commits (no kernel changed; the DLLs
+are dated 11-07).  Per kind: `worker_fec` 946 -> 682-691, its LDPC 758 -> 526-531, `worker_demod`
+297 -> 283-293.  The LDPC was slower by a third on those two nights and nothing in this tree
+explains it; what the box was doing at the time (the 06:40 sonde hunt was found holding the
+radio this morning; what ran overnight is not recorded) is the open variable.  Recorded here so
+that no run-to-run comparison across sessions is read as a code effect again; within a
+session the spread is 1-2%.  One more thing the two interpreters show: Python312 converges
+**4848**/5986 and radioconda **4850** on the same file, each identical to itself at every
+layout -- a two-Block float difference between numpy builds, not a defect, but the number to
+expect when a gate is re-run under the other interpreter.
+
+**6. The 4090.**  `_default_accel()` picks `gpu-full` on this box (torch 2.6, CUDA present),
+which is why the recipe carries `--accel cpu`.  Measured on the strong bank with `--plp1` and
+the default pool (6 x 4): default/`gpu`/`gpu-full` all run the LDM path (locked, 185 Frames)
+at **1.568 / 1.583 / 1.592x**, timers identical -- the LDM pool ignores the engine, only the
+front end changes -- against `--accel cpu` at the same pool **1.705x**.  The GPU front end is
+7% slower here and converges **4864**/5986 against the CPU's 4850: its float path differs
+and, on this file, in the favourable direction by 14 Blocks.  The recipe keeps `--accel cpu`;
+a GPU that carried the LDPC would be a different project.
+
+**7. The Enhanced layer** needs an antenna with 8.6 dB more gain, not code (13.25).  Not
+measured today: the yagi test needs hands on the mast.
+
+**8. Soak.**  The whole stack on Antenna A at 8 x 2 with `--cc`, 08:01:41 to 09:37:57 -- **95 minutes**
+(the driver's 60-minute close failed: `_tv/player.pid` holds JSON, `{"pid": N, ...}`, not a number;
+the window was closed by hand at 09:37 and the stack went to 0 processes).  Chain: **23,638 Frames at
+1.00x, 0 shed**, FEC **749,522 / 815,616 = 91.9%** converged over the run -- 98-99% per five-minute
+span from 08:17 to 08:47, then down to 80-85% by 09:30 as the morning carrier faded; **25 CTI lock
+losses**, every one in a fade (six between 08:12:11 and 08:13:35, four around 08:50, the rest after
+09:07), every one re-acquired.  Viewer: **950 chunks, 5,700 s of mux out, 0 dropped, 0 fails**; eng
+muxed stereo throughout; one player respawn at 09:16:48 (`player stalled 20s (q 4) -- respawning
+ffplay at the live edge`, the viewer's own catch-up rule).  Audio workers: 132,979 frames, 18 bad,
+11,201 pad frames (the holes the fades left, filled with silence by design), 0 respawns.  Captions:
+6,600-line srt.  Memory: the stack's working set 4.4 GB at 08:06, 6.4 GB from 08:16 on and **flat to
+the end** (6.3-6.7 GB over the last 75 minutes) -- no growth.
+
+One thing the soak taught about the telemetry: from 08:16 to 08:50 every chunk's `player write`
+read 4-12 s and the stall column 4-13 s with 0 dropped.  That is not the player misbehaving and
+not the codec (the A/B switch `--acpl-as-51` was written for the question and not needed): the
+08:12 fade left holes, the mux held, then caught up in a burst (17 chunks in the 08:13 minute, lag
+64 s) that filled ffplay's input pipe, and from then on each write waited for playback -- a FULL
+pipe, steady, until the next fade drained it.  The picture was ~35 s further behind air than the
+mux-side `lag` column said for those 34 minutes.  The 09:16 respawn is the policy that ends such a
+state when it exceeds 20 s with four chunks queued.  A "stall" with 0 dropped after a fade is the
+viewer working; a stall with no fade in the chain log would be something else.
+
+**Where it stands.**  Branch `onair-techniques-plp1-live` is 43 commits past `origin/master`;
+the merge is a decision, not a fix.  Repo-root run outputs (`out*/`, `gate_*.log`, `e12x_*/`)
+are ignored since 8a411c6.  Left open: the A-CPL upmix (a decoder feature), the LDPC (the limit
+on every layout), and the Enhanced layer's antenna.
