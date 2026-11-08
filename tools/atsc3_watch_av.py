@@ -290,13 +290,28 @@ def main():
         shutil.rmtree(tvdir, ignore_errors=True)
 
     procs = []
+    logs = []
     job = _windows_job()
     job_warned = [False]
 
     def spawn(cmd, quiet=True):
+        # 13.27: a quiet child used to go to DEVNULL.  The 60-minute Antenna B
+        # soak restarted the chain four times and lost a caption worker, and
+        # the supervisor's four verdicts and the worker's traceback were
+        # nowhere -- the question "why" had no answer.  Quiet children now
+        # append to <live>/<worker>.log (atsc3_run.log, atsc3_subs.log); the
+        # ones that are not quiet keep sharing this console.
+        out = subprocess.DEVNULL
+        if quiet:
+            stem = os.path.splitext(os.path.basename(cmd[1]))[0]
+            try:
+                out = open(os.path.join(live, stem + ".log"), "ab", buffering=0)
+                logs.append(out)
+            except OSError:
+                out = subprocess.DEVNULL
         p = subprocess.Popen(
             cmd, cwd=ROOT,
-            stdout=subprocess.DEVNULL if quiet else None,
+            stdout=out if quiet else None,
             stderr=subprocess.STDOUT if quiet else None)
         p._av_cmd = list(cmd)          # E111: so the supervisor can respawn
         procs.append(p)
@@ -509,6 +524,11 @@ def main():
         return 0
     finally:
         teardown(procs)
+        for f in logs:
+            try:
+                f.close()
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":

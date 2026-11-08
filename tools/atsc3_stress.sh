@@ -12,7 +12,7 @@
 # Single-tenant radio: stop the TV first (~/watch_tv_both.sh stop).
 set -u
 SURVEY=$1; OUT=$2; SECS=${3:-45}; ANT=${4:-Antenna B}
-REPO=$HOME/Projects/_private/atsc3-private
+REPO=${REPO:-$(cd "$(dirname "$0")/.." && pwd)}   # the checkout this script lives in
 PY=$HOME/Projects/.venv/bin/python
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 ATSC3_BIAST=1 ATSC3_METEOR_WINDOW=off ATSC3_PLP1_LOG=1
 mkdir -p "$OUT"
