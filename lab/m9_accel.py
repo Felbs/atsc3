@@ -209,6 +209,34 @@ def bch_syndrome(bits, ninner=16200):
     return out
 
 
+_BCHK = {"lib": None}
+
+
+def _bch_lib():
+    """lab/bch_kernel.{so,dll} (python lab/build_bch_kernel.py), or None."""
+    lib = _BCHK["lib"]
+    if lib is None:
+        lib = False
+        if os.environ.get("ATSC3_BCH_KERNEL", "1") != "0":
+            try:
+                import ctypes
+                path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "bch_kernel.dll" if os.name == "nt" else "bch_kernel.so")
+                cand = ctypes.CDLL(path)
+                cand.bch_kernel_abi.restype = ctypes.c_int32
+                if int(cand.bch_kernel_abi()) != 1:
+                    raise OSError("bch kernel ABI mismatch")
+                u64 = np.ctypeslib.ndpointer(np.uint64, flags="C")
+                u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")
+                cand.bch_parity_u64.restype = ctypes.c_int32
+                cand.bch_parity_u64.argtypes = [u64, ctypes.c_int32, ctypes.c_int32, u64, ctypes.c_int32, u8]
+                lib = cand
+            except OSError:
+                lib = False
+        _BCHK["lib"] = lib
+    return lib or None
+
+
 def bch_syndrome_batch(bits2d, ninner=16200):
     """(nblk, n) -> (nblk,) python ints.  Same algebra, one broadcast pass.
 
@@ -224,8 +252,16 @@ def bch_syndrome_batch(bits2d, ninner=16200):
     if pad:
         a = np.concatenate([a, np.zeros((nblk, pad), np.uint8)], axis=1)
     v = np.packbits(a, axis=1).view(np.uint64)                  # (nblk, nw)
-    par = (np.bitwise_count(v[:, None, :] & mask[None, :, :]).sum(2)
-           & 1).astype(np.uint8)                                # (nblk, deg)
+    lib = _bch_lib()
+    if lib is not None:
+        # E108: the same popcounts in C, no (nblk, deg, nw) temporary
+        v = np.ascontiguousarray(v)
+        par = np.empty((nblk, mask.shape[0]), np.uint8)
+        if lib.bch_parity_u64(v, nblk, nw, mask, mask.shape[0], par) != 0:
+            lib = None
+    if lib is None:
+        par = (np.bitwise_count(v[:, None, :] & mask[None, :, :]).sum(2)
+               & 1).astype(np.uint8)                            # (nblk, deg)
     nz = np.flatnonzero(par.any(1))
     out = [0] * nblk
     for i in nz:

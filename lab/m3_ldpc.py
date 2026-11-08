@@ -225,13 +225,27 @@ def flatten(checks, n):
 # normalized min-sum BP
 # --------------------------------------------------------------------------
 
+_PACK_CACHE = {}
+
+
 def pack(checks, n):
     """Rectangular padded view of the check node structure (degrees vary 4..11).
 
     Returns (idx, mask) of shape (n_checks, max_degree).  Padded slots point at
     a dummy column n and are masked out, which lets the whole BP iteration run
     as array operations instead of a 12960-iteration Python loop.
+
+    E119: cached per (checks object, n) -- the tables are code-constant and
+    this Python loop over 12,960 checks was 42 ms of every 73 ms L1-Basic
+    decode on the live path (profiled 2026-11-07).  The caller receives the
+    cached arrays themselves; no caller writes to them (they are index and
+    mask inputs), and the cache keeps the `checks` object alive so its id
+    cannot be reused.  Bit-identical by construction.
     """
+    key = (id(checks), int(n))
+    hit = _PACK_CACHE.get(key)
+    if hit is not None and hit[0] is checks:
+        return hit[1], hit[2]
     nc = len(checks)
     dmax = max(len(c) for c in checks)
     idx = np.full((nc, dmax), n, np.int32)
@@ -239,6 +253,7 @@ def pack(checks, n):
     for i, c in enumerate(checks):
         idx[i, :len(c)] = c
         mask[i, :len(c)] = True
+    _PACK_CACHE[key] = (checks, idx, mask)
     return idx, mask
 
 
@@ -687,3 +702,152 @@ if __name__ == "__main__":
         good &= selftest(("2/15", "6/15", "7/15", "9/15"), n=64800)
         print()
     raise SystemExit(0 if good else 1)
+
+
+# ---------------------------------------------------------------------------
+# E107 -- the layered, eight-lane kernel (lab/ldpc_layered_kernel.c)
+# ---------------------------------------------------------------------------
+# ON by default for the cpu_fast path since gate_e107_ldpc.py passed on real
+# air with seeded noise (2026-11-07: converged set never shrank, +28 blocks at
+# the cliff, bytes identical, 1.9x faster); ATSC3_LDPC_LAYERED=0 restores the
+# flooding kernel.  It is a change of SCHEDULE, not of rule: a block both
+# kernels decode yields the same codeword; the layered one needs about half
+# the iterations and serves eight blocks per vector.
+LAYERED_DEFAULT = os.environ.get("ATSC3_LDPC_LAYERED", "1") != "0"
+_LAYERED_STATE = {"lib": None, "logged": False}
+LAYERED_LANES = 8
+
+
+def _layered_lib():
+    with _KERNEL_LOCK:
+        lib = _LAYERED_STATE["lib"]
+        if lib is None:
+            lib = False
+            name = ("ldpc_layered_kernel.dll" if os.name == "nt"
+                    else "ldpc_layered_kernel.so")
+            path = os.path.join(HERE, name)
+            try:
+                import ctypes
+                cand = ctypes.CDLL(path)
+                cand.ldpc_layered_abi.restype = ctypes.c_int32
+                abi = int(cand.ldpc_layered_abi())
+                if abi not in (3, 4):
+                    raise OSError("layered kernel ABI mismatch (rebuild: python lab/build_ldpc_layered_kernel.py)")
+                i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
+                f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
+                u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")
+                cand.ldpc_layered_f32.restype = ctypes.c_int32
+                cand.ldpc_layered_f32.argtypes = [
+                    f32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                    ctypes.c_int32, i32, i32, ctypes.c_int32, ctypes.c_float,
+                    ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                    u8, u8, i32, i32, f32]
+                # E118: ABI 4 adds the lane-compacting entry point (any nblk)
+                cand.has_pack = abi >= 4
+                if cand.has_pack:
+                    cand.ldpc_layered_pack_f32.restype = ctypes.c_int32
+                    cand.ldpc_layered_pack_f32.argtypes = cand.ldpc_layered_f32.argtypes
+                lib = cand
+            except OSError as ex:
+                if not _LAYERED_STATE["logged"]:
+                    _LAYERED_STATE["logged"] = True
+                    print(f"[m3_ldpc] layered LDPC kernel unavailable ({name}: {ex}); "
+                          f"flooding kernel in use -- python lab/build_ldpc_layered_kernel.py",
+                          file=sys.stderr)
+            _LAYERED_STATE["lib"] = lib
+        return lib or None
+
+
+# E110: the two-minimum correction of the check rule (see the kernel's notes).
+# Off until gate_e107_ldpc.py --box passes; ATSC3_LDPC_BOXPLUS=1 turns it on.
+#: E112: "k,t,stall" -- from sweep k give a block up when its syndrome weight
+#: is >= t or has not improved for `stall` sweeps (0 disables each).  ON by
+#: default from E112's gate (zero blocks lost at every level on two codes, bytes
+#: identical, 1.87x over layered); "0,0,0" turns it off.
+#: T < 1 means a fraction of the code's checks (E112 sizing: hopeless blocks sit
+#: flat at ~0.39 of the checks from sweep 1; converging ones are under 0.32 by
+#: sweep 8).  Shipping rule from the sizing, gated by gate_e107 --abort.
+ABORT_DEFAULT = tuple(float(x) for x in os.environ.get("ATSC3_LDPC_ABORT", "8,0.36,0").split(","))
+BOXPLUS_DEFAULT = os.environ.get("ATSC3_LDPC_BOXPLUS", "0") == "1"
+#: E119: the L1 decoders (L1-Basic in m3_l1basic, L1-Detail in m8_l1) run
+#: their one-block min-sum through the compiled flooding kernel in float32
+#: instead of the numpy float64 loop.  Referee: gate_e119_l1_kernel.py.
+L1_KERNEL = os.environ.get("ATSC3_L1_KERNEL", "1") != "0"
+
+
+def l1_min_sum_decode(llr, checks, n, iters=50, alpha=0.75):
+    """One block, the L1 decoders' call: kernel when L1_KERNEL, else numpy."""
+    if L1_KERNEL:
+        r = min_sum_decode_batch(np.asarray(llr)[None, :], checks, n, iters=iters,
+                                 alpha=alpha, dtype=np.float32)
+        if r[0] is not None:
+            return r[0][0], bool(r[1][0]), int(r[2][0]), int(r[3][0])
+    return min_sum_decode(llr, checks, n, iters=iters, alpha=alpha)
+#: E118: lane compaction -- one kernel call per thread's share of the batch,
+#: lanes refilled as blocks retire.  Bit-identical per block on 1,162 banked
+#: real-air blocks (gate_e118_ldpc_pack.py) but NOT faster on a 35-block batch
+#: split over two threads: 0.98x on the gate, because the near-miss lanes that
+#: run all 50 sweeps end up alone at the tail of each share (26% of the pack's
+#: sweeps run with one or two lanes active) and each refill costs about a
+#: sweep.  The recorded schedule says the win needs the tail amortised ACROSS
+#: batches (one 8-lane share per batch, two batches per worker at once: 24%
+#: off) -- a pool change, not a kernel one.  OFF until that lands;
+#: ATSC3_LDPC_PACK=1 turns it on.
+PACK_DEFAULT = os.environ.get("ATSC3_LDPC_PACK", "0") == "1"
+
+
+def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=None, abort=None, pack=None):
+    """E107: (nblk, n) float32 LLRs -> (bits2d, conv, its, bad), the batch
+    decoder's shape, eight blocks per kernel call, calls spread over `ex`.
+    Returns None when the kernel cannot serve the call (caller falls back)."""
+    lib = _layered_lib()
+    if lib is None:
+        return None
+    tabs = _kernel_tables(checks, n)
+    if tabs is None:
+        return None
+    cptr, cidx, vptr, vedge, nedges = tabs
+    llr = np.ascontiguousarray(lam2d, np.float32)
+    nblk = int(llr.shape[0])
+    bits = np.empty((nblk, n), np.uint8)
+    conv = np.zeros(nblk, np.uint8)
+    its = np.full(nblk, iters, np.int32)
+    bad = np.full(nblk, -1, np.int32)
+    if nblk == 0:
+        return bits, conv.view(bool), its, bad
+    nc = len(cptr) - 1
+    corr = BOXPLUS_DEFAULT if corr is None else bool(corr)
+    ak, at, ast = ABORT_DEFAULT if abort is None else tuple(float(x) for x in abort)
+    ak, ast = int(ak), int(ast)
+    at = int(round(at * nc)) if 0 < at < 1 else int(at)   # T < 1: a fraction of the checks
+
+    pack = (PACK_DEFAULT and getattr(lib, "has_pack", False)) if pack is None else bool(pack)
+    if pack:
+        # E118: split the batch into one contiguous share per thread (or one
+        # share), each a single kernel call that keeps its eight lanes full.
+        nsh = max(1, min(nblk, int(getattr(ex, "_max_workers", 1)) if ex is not None else 1))
+        step = (nblk + nsh - 1) // nsh
+        bounds = [(lo, min(lo + step, nblk)) for lo in range(0, nblk, step)]
+
+        def one_pack(lohi):
+            lo, hi = lohi
+            work = np.empty((n + nedges) * LAYERED_LANES, np.float32)
+            return lib.ldpc_layered_pack_f32(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                             int(iters), np.float32(alpha), int(corr), ak, at, ast,
+                                             bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
+        rcs = list(ex.map(one_pack, bounds)) if ex is not None else [one_pack(b) for b in bounds]
+        if any(rc != 0 for rc in rcs):
+            return None
+        return bits, conv.view(bool), its, bad
+
+    def one(lo):
+        hi = min(lo + LAYERED_LANES, nblk)
+        work = np.empty((n + nedges) * LAYERED_LANES, np.float32)
+        return lib.ldpc_layered_f32(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                                    int(iters), np.float32(alpha), int(corr), ak, at, ast,
+                                    bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
+    los = list(range(0, nblk, LAYERED_LANES))
+    rcs = list(ex.map(one, los)) if ex is not None else [one(lo) for lo in los]
+    if any(rc != 0 for rc in rcs):
+        return None
+    return bits, conv.view(bool), its, bad

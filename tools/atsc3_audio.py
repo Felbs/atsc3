@@ -541,6 +541,7 @@ def main():
     # went to silence. Order L R C LFE Ls Rs = the standard WAV 6-channel
     # layout, so the file IS a 5.1 file without any channel map.
     chans = Ac4Stream.CHANS if a.channels == 6 else ("L", "R")
+    acpl3_said = [False]
     wav = WavAppender(out, ch=a.channels, resume=resume_n)
     dec = Ac4Stream(element=a.element)
     LEAD = 4                        # frames of QMF lead-in, discarded
@@ -677,6 +678,21 @@ def main():
                 pcm, fb_state = FB.synthesise_frames(
                     wins6, lens6, cnts6, 1536,
                     states=fb_state, return_state=True)
+                # 13.25: an ASPX_ACPL_3 programme (RF25's 5.1) is a two-
+                # channel core plus A-CPL; the decoder gives L/R only.  The
+                # wav keeps the channel count it was opened with, so the
+                # four channels that do not exist as coded channels are
+                # written silent (A-CPL upmix is not built).
+                if len(pcm) < len(chans):
+                    if not acpl3_said[0]:
+                        acpl3_said[0] = True
+                        print(f"  stream is ASPX_ACPL_3 (2-ch core + A-CPL): "
+                              f"rendering L/R; {[k for k in chans if k not in pcm]} "
+                              f"written silent", flush=True)
+                    n_ref = len(next(iter(pcm.values())))
+                    for k in chans:
+                        if k not in pcm:
+                            pcm[k] = np.zeros(n_ref)
                 # Six independent framings must still agree on TOTAL samples
                 # -- every frame is one frame long on every channel. If they
                 # ever disagree, crop to the shortest and SAY so; a silent
@@ -773,9 +789,16 @@ def main():
                     # E51: anchor by FRAGMENT position, never cursor//60 --
                     # truncated fragments make the two disagree by minutes.
                     first_slot = frag_seq(idx_path, anchor_frag)
+                    # 13.26: how many channels the STREAM codes.  An
+                    # ASPX_ACPL_3 programme is a stereo core (the other
+                    # four are written silent above, A-CPL not built), and
+                    # the viewer should mux it as the stereo it is rather
+                    # than a 5.1 whose C/Ls/Rs/LFE are zeros.
                     json.dump(dict(first_seq=first_slot, fs=OUT_FS,
                                    pid=lane["pid"], path=out,
-                                   wav_base=n_wav0, generation=gen_seen),
+                                   wav_base=n_wav0, generation=gen_seen,
+                                   channels_coded=(2 if acpl3_said[0]
+                                                   else len(chans))),
                               open(os.path.splitext(out)[0] + ".json", "w"))
                 cursor += len(new)
                 del pending[:len(new)]

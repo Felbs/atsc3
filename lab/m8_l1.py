@@ -186,8 +186,16 @@ def decode(cells, g, iters=150, no_repeat=False, _c={}):
     key = (g["rate"], g["Ninner"])
     if key not in _c:
         _c[key] = LD.parity_check(g["rate"], n=g["Ninner"])
-    bits, conv, it, bad = LD.min_sum_decode(llr, _c[key], g["Ninner"],
-                                            iters=iters)
+    # E119: the same normalised min-sum (alpha 0.75) through the compiled
+    # flooding kernel in float32, one block (LD.L1_KERNEL).  Measured why: on
+    # marginal air the numpy decoder runs its 100-150 iterations at ~15
+    # kernels each, and E115 re-reads L1 from every held window at every
+    # cold verdict -- 77 ms a Frame of main-thread time at 12 dB of added
+    # noise on the 32-core box, 170-570 when nothing locks.  The L1 fields
+    # are protected by their own BCH/CRC, so the referee is field identity
+    # across the switch (gate_e119_l1_kernel.py).
+    bits, conv, it, bad = LD.l1_min_sum_decode(llr, _c[key], g["Ninner"],
+                                               iters=iters)
     nouter = bits[ipos]
     syn = L1.bch_syndrome(nouter)
     return dict(converged=bool(conv), iters=int(it), unsatisfied=int(bad),

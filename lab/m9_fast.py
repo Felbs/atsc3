@@ -874,6 +874,38 @@ class FrameDecoder:
                      & (abs_ratio <= mg.ce_abs) & (Wn > 0) & ~w_c)
         n_fb = int(nsym - smooth_ok.sum())
 
+        # E104 lever 4 (2026-11-06): the smoothed grid's response formed in
+        # the delay domain, one full-resolution row per accepted symbol.  The
+        # kernel then reads that row with an IDENTITY grid map (every carrier
+        # its own grid point, weight 0; the last one leans on its neighbour
+        # with weight 1), so the C side is untouched.  Refused symbols keep
+        # the linear read of the grid exactly as before.  Off by default
+        # (MarginCfg.ce_comb / ATSC3_CE_COMB); the gain, the idea's origin and
+        # the gate are in m16_margin lever 4 and PRIOR_ART §13.
+        comb_used = np.zeros(nsym, bool)
+        Hcomb = None
+        if getattr(mg, "ce_comb", False) and Wn > 0 and smooth_ok.any():
+            import m16_margin as _M16
+            sel = np.flatnonzero(smooth_ok)
+            Hf, u = _M16.comb_denoise_grid(Hsm[:, sel], smt["dx"], self.gx.nfft,
+                                           min_period=int(gi))
+            if u.any():
+                comb_used[sel] = u
+                Hcomb = np.zeros((nsym, smt["noc"]), np.complex128)
+                Hcomb[sel[u]] = Hf[u]
+            if os.environ.get("ATSC3_CE_COMB_LOG"):
+                k = getattr(self, "_comb_log_n", 0)
+                self._comb_log_n = k + 1
+                if k % 25 == 0:
+                    print(f"  E104 comb estimate: {int(u.sum())}/{len(sel)} smoothed symbols "
+                          f"(window {smt['noc']} carriers, dx {smt['dx']}, guard {int(gi)})",
+                          file=sys.stderr, flush=True)
+        if Hcomb is not None:
+            noc_c = smt["noc"]
+            jg_id = np.minimum(np.arange(noc_c), noc_c - 2).astype(np.int32)
+            wt_id = np.zeros(noc_c, np.float64)
+            wt_id[-1] = 1.0
+
         lens = cp["lens"]
         offs = np.concatenate([[0], np.cumsum(lens)]) + len(spare)
         pool = np.empty(int(offs[-1]), np.complex128)
@@ -929,12 +961,17 @@ class FrameDecoder:
                 for i, l in enumerate(rows):
                     row = np.ascontiguousarray(Yb[l], np.complex128)
                     if sm[i]:
-                        Hgc = np.ascontiguousarray(Hsm[:, l], np.complex128)
+                        if comb_used[l]:
+                            Hgc = np.ascontiguousarray(Hcomb[l], np.complex128)
+                            jga, wta = jg_id, wt_id
+                        else:
+                            Hgc = np.ascontiguousarray(Hsm[:, l], np.complex128)
+                            jga, wta = jgc, wtc
                         cli = complex(cl[l])
                         rc = kern.cellpool_row_sm_f64(
                             row.view(np.float64), row.shape[0],
                             Hgc.view(np.float64), Hgc.shape[0],
-                            jgc, wtc, len(jgc), cli.real, cli.imag,
+                            jga, wta, len(jga), cli.real, cli.imag,
                             kc["bins_d"], kc["dmap"], kc["hmat"][i], nd,
                             xg1.view(np.float64))
                     else:
@@ -957,6 +994,9 @@ class FrameDecoder:
             if sm.any():
                 Hc = Hsm[:, rows[sm]].T
                 H[sm] = (Hc[:, jg] * (1.0 - wtg) + Hc[:, jg + 1] * wtg)
+                cu = comb_used[rows]
+                if cu.any():                        # E104: the delay-domain rows
+                    H[cu] = Hcomb[rows[cu]]
                 H[sm] *= cl[rows[sm]][:, None]     # re-apply the symbol gain
             if (~sm).any():                     # untouched per-symbol path
                 hpf = hp[~sm]
@@ -977,7 +1017,8 @@ class FrameDecoder:
                    n_preamble_cells=int(npre), n_normal=int(cp["n_norm"]),
                    n_sbs_active=int(lens[0]), n_null=int(cp["n_null"]),
                    null_low=int(cp["lo_n"]), pool=int(len(pool)),
-                   fell_back=n_fb, detect_ratio_max=float(ratio.max()),
+                   fell_back=n_fb, n_comb=int(comb_used.sum()),
+                   detect_ratio_max=float(ratio.max()),
                    detect_ratios=[round(float(r), 2) for r in ratio],
                    abs_ratios=[round(float(r), 2) for r in abs_ratio])
         return pool, dict(symbol_of=owner, report=rep)
@@ -1337,6 +1378,15 @@ class FrameDecoder:
             return (np.empty((0, chain.ninner), np.uint8),
                     np.zeros(0, bool), np.zeros(0, np.int32),
                     np.zeros(0, np.int32))
+        # E107: the layered eight-lane kernel, cpu_fast only, off by default
+        # (ATSC3_LDPC_LAYERED=1, or fd.ldpc_layered = True); the exact
+        # float64 path never routes through it.
+        if self.cpu_fast and getattr(self, "ldpc_layered", LD.LAYERED_DEFAULT):
+            r = LD.layered_decode_batch(lam2d, chain.checks, chain.ninner,
+                                        iters=self.iters, alpha=alpha, ex=self.ex,
+                                        corr=getattr(self, "ldpc_boxplus", None), abort=getattr(self, "ldpc_abort", None))
+            if r is not None:
+                return r
         nch = 1 if self.ex is None else max(1, min(nb, self.threads))
         step = (nb + nch - 1) // nch
         sls = [slice(i * step, min(nb, (i + 1) * step))
@@ -1517,6 +1567,9 @@ class FrameDecoder:
             snr_db = M16.frame_snr_db(pool, self.gx.dummy_start)
             use_w = (mg.wllr == "on"
                      or (snr_db is not None and snr_db < mg.snr_gate_db))
+            if snr_db is not None and os.environ.get("ATSC3_SNR_LOG"):
+                # E104 gate instrument: one line per frame, grep-able
+                print(f"  SNRLOG frame dummy_snr_db {snr_db:.3f}", file=sys.stderr, flush=True)
             # += 0 creates the key: the counter must EXIST at zero so the
             # strong-signal gate can tell "switch held" from "not recorded"
             tm["n_wllr_frames"] += int(use_w)

@@ -39,3 +39,48 @@ extracted from published standards. The standards DOCUMENTS themselves are
 copyrighted by their publishers (including ATSC and ETSI) and are NOT
 redistributed by this project. Where a table is shipped, it is the numeric data
 only — never the source document or its text.
+
+--------------------------------------------------------------------------------
+TECHNIQUES LEARNED FROM OTHER PROJECTS
+--------------------------------------------------------------------------------
+Some methods in this software were first seen, by us, in other open-source
+receivers. In every such case the method was understood from its description
+and re-implemented here from the principle; no code was copied, and the
+other project's licence does not apply to this one. We name them because
+credit is owed and because a reader may want to compare the two.
+
+  Provenance. This project's television work began on 2026-04-29 (an
+  ATSC 1.0 tuner, Software-TV-Tuner), decoded its first broadcast on
+  2026-05-01, ran unattended for the first time on 2026-05-02/03, and
+  decoded its first ATSC 3.0 signalling from real air on 2026-08-05 -- all
+  without knowledge of OnAir. The first idea taken from OnAir is dated
+  2026-11-06. Nothing before that date owes anything to it.
+
+  OnAir  (adswill/OnAir, GPL-3.0)  https://github.com/adswill/OnAir
+    Channel estimation in the delay domain for ATSC 3.0: the pilot comb's
+    impulse response with the noise-only taps removed, instead of linear
+    interpolation between pilots (our lab/e104_combce.py). Our version
+    differs in its transform length and in refusing combs too sparse for
+    the guard interval; the idea and the measured 0.5-1.5 dB cost of linear
+    interpolation we learned from theirs.
+
+    The layered (row-by-row) LDPC schedule for the ATSC 3.0 codes, as a
+    way to halve the iterations a Block needs (our lab/ldpc_layered_kernel.c,
+    E107): eight-lane layout, scheduling and the parity-check tables are
+    ours; the choice of a layered schedule over flooding we tried because
+    theirs does it.  Measured: decode time halved, a few tenths of a dB at
+    the cliff.
+
+    The two-minimum ("box-plus") correction of min-sum LDPC decoding (E110,
+    ATSC3_LDPC_BOXPLUS=1).  A textbook correction; we tried it here because
+    their notes said it mattered on marginal signal.  Measured: ~0.2 dB on
+    strong carriers, and on marginal signal it crosses the threshold the
+    interleaver lock needs -- "never locks" becomes "locks".
+
+    Decoding every Subframe live rather than one (our lab/m17_plp1_live.py).
+    Not a technique; a prompt.  They did it, so we built it.
+
+  That is the whole of it: three techniques and one prompt, each measured
+  above and in PRIOR_ART.md s13.  The receiver -- bootstrap through picture,
+  the AC-4 decoder, the LDM canceller and pool, the viewer, the gates -- is
+  ours, and predates our knowledge of OnAir (dates above).

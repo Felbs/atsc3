@@ -38,6 +38,7 @@ class Ac4Stream:
         # "5_X" = the 5.1 programme element (English main). "pair" = the
         # stereo channel_pair_element (Table 22) -- the Spanish simulcast.
         self.element = element
+        self.acpl3 = False      # 13.25: set once the stream shows a 2-ch core + A-CPL
         self.T = C.load_tables()
         arrays = H.parse_c(H.DEFAULT_C)
         self.tabs = {n[:-4]: S.Huff(arrays[n], arrays[n[:-4] + "_CW"])
@@ -132,6 +133,16 @@ class Ac4Stream:
                 # asked for. Narrow the request instead of KeyError-ing.
                 if r.get("acpl3"):
                     chans = ("L", "R")
+                    self.acpl3 = True
+                    # 13.25: the output lists were built for the REQUESTED
+                    # channels; from here every frame gives only a pair, so
+                    # C / Ls / Rs / lfe would keep a shorter history than
+                    # L / R and the grouped filterbank would index past
+                    # their frame counts (IndexError in synthesise_frames,
+                    # the RF25 5.1 lane, live and banked).  Drop them.
+                    for k in list(wins):
+                        if k not in chans:
+                            wins.pop(k); lengths.pop(k); counts.pop(k)
                 elif self.element != "pair":
                     fm.update({"Ls": r["st_sr"]["framing"],
                                "Rs": r["st_sr"]["framing"],

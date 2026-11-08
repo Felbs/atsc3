@@ -15,6 +15,12 @@ lab/*
 # E109: same law for the AC-4 QMF bank's source.
 !lab/qmf_kernel.c
 !lab/spectral_kernel.c
+# E107: the layered eight-lane LDPC kernel (holds the E110 two-minimum correction).
+!lab/ldpc_layered_kernel.c
+# E108: the compiled BCH syndrome kernel's source.
+!lab/bch_kernel.c
+# The RF33 L1 reference record gate_e107 reads: reference data, not a capture.
+!lab/m4_l1detail_hit_rf33.json
 # The per-carrier gain table is CALIBRATION CONFIG, not a capture artifact:
 # it is hand-edited, diffed and reviewed, and a value nobody can see in git
 # is a value nobody can check (the gitignore-hides-data law). Keep it in.
@@ -94,3 +100,15 @@ SCRUB_AUDIT.md
 # the banked NUMERIC tables ship (facts, not the standards documents)
 !lab/spec_bank/
 !lab/spec_bank/**
+
+# gate_e123_relock writes its run outputs here (lanes, logs, json): scratch, never source
+e123_out/
+
+# 13.26: run outputs the gates and sweeps drop at the repo root (lanes, logs, json):
+# scratch, never source.  Keep them, back them up, do not commit them.
+/out*/
+/out*.json
+/out*.log
+/e12[0-9]_*/
+/gate_*.log
+/gate_*.json

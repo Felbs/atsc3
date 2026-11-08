@@ -258,7 +258,7 @@ def decode_one(z, mode, variant="standard", gw_invert=False, iters=100,
     if key not in checks_cache:
         checks_cache[key] = LD.parity_check("3/15", variant=variant)
     checks = checks_cache[key]
-    bits, conv, it, bad = LD.min_sum_decode(llr, checks, 16200, iters=iters)
+    bits, conv, it, bad = LD.l1_min_sum_decode(llr, checks, 16200, iters=iters)   # E119
     ipos, _ = info_positions()
     nouter_bits = bits[ipos]
     syn = bch_syndrome(nouter_bits)

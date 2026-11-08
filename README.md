@@ -277,6 +277,33 @@ recorded failure is a reference, not an authority.
 
 ---
 
+## Firsts, dated
+
+Every line below is a commit in this repository (or its ATSC 1.0 predecessor), so the
+dates are checkable, not remembered.  The full provenance table is PRIOR_ART.md s13.0;
+the credit owed to other projects is in NOTICE, and the first idea taken from any other
+receiver is dated 2026-11-06 -- everything before that line was built from the standards.
+
+| date | first | evidence |
+|---|---|---|
+| 2026-05-01 | First broadcast decoded by our own ATSC 1.0 chain (RF34) | Software-TV-Tuner, README milestone commit |
+| 2026-08-05 | First ATSC 3.0 signalling from real air: bootstrap detected, L1-Basic decoded (LDPC converges, BCH zero, CRC-32 checks), RF33 | `21b267d`, `d4dfb41` |
+| 2026-08-06 | First ATSC 3.0 live television: 4 m 20 s on air, zero underruns, decoded bytes identical to the banked decode | `5e2b3ab` (M11) |
+| 2026-08-06 | First second-Subframe PLP decoded (Subframe 1 / PLP 1, 468/468 FEC Blocks) -- the de-interleaver reset rule, measured not assumed | `a110cc5` (M13) |
+| 2026-08-06 | The LDM canceller built: the Core layer of RF25 reconstructed from decoded Blocks and cancelled from the received cells (fit at &#124;a&#124; = 0.903), the Enhanced layer found noise-limited and recorded as such, not as a budget | `710fe08` (M10) |
+| 2026-08-08 | **First LDM decode from air: RF25's Core layer end to end to a playable video file**, after a two-frame CTI clock-offset bug that had impersonated weak SNR | `6d4eb23` (E49) |
+| 2026-08-08 | Dual-language viewer with toggleable captions; the Spanish pair-element AC-4 decoder | `f486813` |
+| 2026-08-11 | First live IP datagrams from the LDM carrier (FEC 0.24% -> 14.0% with the channel estimate on) | `ba64fee` (E86d) |
+| 2026-08-22/23 | Live ATSC 3.0 television with 5.1 audio on a Raspberry Pi 5 | PRIOR_ART s13.0 |
+| 2026-11-07 | **Both LDM layers decoded through our own canceller in a synthesized round trip** (E122): Core at 5 dB injection, Enhanced 35/35 and 47/47 Blocks, the canceller inverts itself | `7e0ac84` |
+| 2026-11-07 | **First real-time live LDM television**: the six-core box at 1.00x sustained, 371 Frames, 0 shed; the 32-core box with headroom | `096d030`, `474c327` (13.20-13.24) |
+| 2026-11-08 | Live LDM television with the viewer -- picture, both audio languages, captions -- and a 95-minute soak at 1.00x, 0 dropped chunks | `99180e0`, `a09940d` (13.25-13.26) |
+
+What has **not** happened, stated as plainly: RF25's Enhanced layer (256QAM-NUC 7/15) has
+never decoded from the air at this site.  Its own SNR after a perfect Core cancellation
+measures 3.9 dB against the ~12.5 dB it needs (PRIOR_ART s13.25); the decoder for it is
+built and proven on synthesized signal, and the remaining 8.6 dB is antenna gain.
+
 ## Documentation
 
 | file | what |

@@ -280,6 +280,21 @@ def reference_sequence(n: int):
     return out
 
 
+def ldm_injection_db(idx) -> float:
+    """A/331 L1D_plp_ldm_injection_level (5 bits) -> dB.  0.5 dB steps to
+    10.0 dB (indices 0..20), 1 dB steps to 20.0 dB (21..30), 31 = 25.0 dB.
+    m14_budget and e69_ldm always read it this way (RF25 index 10 = 5.0 dB,
+    RF30 index 8 = 4.0 dB); the LDM plan's describe() printed the RAW index
+    ("inj10"), and E122/E124 (13.20-13.24) took that as 10 dB -- which put
+    the Enhanced layer 18 dB out of reach where it is 8.6 (13.25)."""
+    idx = int(idx)
+    if idx <= 20:
+        return 0.5 * idx
+    if idx <= 30:
+        return 10.0 + (idx - 20)
+    return 25.0
+
+
 def pilot_values(n: int, amp: float):
     """Re{c_k} = 2*A*(1/2 - r_k)  ->  +A when r_k = 0, -A when r_k = 1."""
     return [amp * (1.0 - 2.0 * r) for r in reference_sequence(n)]
