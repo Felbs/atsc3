@@ -1353,6 +1353,20 @@ class FrameDecoder:
             bad[sel] = d[take]
             conv[sel] = c[take]
             todo = todo[~c]
+        # E133: bank every batch that left a Block unconverged (LLRs + verdicts),
+        # for the offline near-miss study.  Off unless ATSC3_LDPC_DUMP_FAIL names a dir.
+        _dd = os.environ.get("ATSC3_LDPC_DUMP_FAIL")
+        if _dd and not conv.all() and not hasattr(lam2d, "device"):
+            try:
+                os.makedirs(_dd, exist_ok=True)
+                _k = getattr(self, "_dump_fail_n", 0)
+                self._dump_fail_n = _k + 1
+                np.savez(os.path.join(_dd, f"fail_{os.getpid()}_{_k:05d}.npz"),
+                         lam=np.asarray(lam2d, np.float32), conv=conv, its=its, bad=bad,
+                         ninner=int(chain.ninner), rate=str(getattr(chain, "rate", "")),
+                         ladder=np.asarray(ladder, float))
+            except Exception as _ex:                               # noqa: BLE001
+                print(f"[E133 dump] {_ex!r}", file=sys.stderr, flush=True)
         return bits, conv, its, bad
 
     def ladder_for(self, chain):

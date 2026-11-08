@@ -11,12 +11,16 @@ ANT=${2:-Antenna A}
 D=${3:-/c/captures/soak_night}
 cd "$(dirname "$0")/.." || exit 1
 export OPENBLAS_NUM_THREADS=1 ATSC3_LDPC_BOXPLUS=1 ATSC3_METEOR_WINDOW=off
+export ATSC3_WORKER_SPREAD=8   # 13.29: one demod worker per core complex; refereed on replay, bytes identical, +33 %
 PY=${PY:-$HOME/radioconda/python.exe}
 LOG=$D.log; MEM=${D}_mem.txt
 rm -rf "$D"; mkdir -p "$(dirname "$D")"
 echo "soak start $(date '+%F %T') ant '$ANT' stop at $STOP_AT -> $D" > "$MEM"
-"$PY" tools/atsc3_watch_av.py --rf 25 --ant "$ANT" --cc --live-dir "$D" \
-  --chain-extra "--accel cpu --plp1 --ldm-procs 8 --ldm-proc-threads 2 --threads 4 --raw-queue 600" > "$LOG" 2>&1 &
+# RF and CHAIN_EXTRA may come from the environment (13.30: the same script stress-tests RF33)
+RF=${RF:-25}
+CHAIN_EXTRA=${CHAIN_EXTRA:---accel cpu --plp1 --ldm-procs 8 --ldm-proc-threads 2 --threads 4 --raw-queue 600}
+"$PY" tools/atsc3_watch_av.py --rf "$RF" --ant "$ANT" --cc --live-dir "$D" \
+  --chain-extra "$CHAIN_EXTRA" > "$LOG" 2>&1 &
 ORCH=$!
 stop_epoch=$(date -d "today $STOP_AT" +%s); now=$(date +%s)
 [ "$stop_epoch" -le "$now" ] && stop_epoch=$(date -d "tomorrow $STOP_AT" +%s)

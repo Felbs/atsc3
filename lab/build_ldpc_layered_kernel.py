@@ -100,8 +100,8 @@ def smoke(path):
     dll = ctypes.CDLL(path)
     dll.ldpc_layered_abi.restype = ctypes.c_int32
     abi = int(dll.ldpc_layered_abi())
-    if abi != 4:
-        return f"ABI {abi} != 4"
+    if abi not in (4, 5, 6):
+        return f"ABI {abi} not in (4, 5, 6)"
     i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
     f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
     u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")

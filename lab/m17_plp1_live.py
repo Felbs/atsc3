@@ -67,6 +67,7 @@ import m6_bicm as B                                              # noqa: E402
 import m6_cells as C                                             # noqa: E402
 import m6_payload as P6                                          # noqa: E402
 import m6_tbi as T                                               # noqa: E402
+import m2_stage_b as SB                                          # noqa: E402
 import m13_sf1 as M13                                            # noqa: E402
 import m16_margin as M16                                         # noqa: E402
 import spec_bitint as BI                                         # noqa: E402
@@ -102,6 +103,18 @@ def comb_response(noc, pk, hp, nfft, min_period):
     H[:r] = Hf[0][0]
     return H
 
+
+#: E132: a Frame whose own residual carrier offset exceeds this is rotated and
+#: transformed again (0.5 Hz = 0.1 % of a 16K carrier spacing -- harmless below).
+CFO_REDO_HZ = float(os.environ.get("ATSC3_PLP1_CFO_REDO_HZ", "0.5"))
+#: E134: the FFT window starts this many samples BEFORE the guard end the
+#: cyclic-prefix fold finds (the fold peak is the true guard start).  On the
+#: RF33 air the usable guard was ~300 of 1536 samples; 32 keeps the window
+#: inside it.  ATSC3_PLP1_TIMING=0 turns the per-Frame placement off.
+TIMING_MARGIN = int(os.environ.get("ATSC3_PLP1_TIMING_MARGIN", "32"))
+TIMING_ON = os.environ.get("ATSC3_PLP1_TIMING", "1") != "0"
+#: the fold's peak must stand this far above its median to be believed
+TIMING_MIN_SCORE = float(os.environ.get("ATSC3_PLP1_TIMING_MIN_SCORE", "4.0"))
 
 class SubframeDecoder:
     """PLP `plp_id` of Subframe `subframe` (> 0), decoded from a whole-Frame window."""
@@ -205,13 +218,47 @@ class SubframeDecoder:
             _sfft.fft(np.zeros((2, g.nfft), np.complex128), axis=1, workers=1)
         except Exception:                                      # noqa: BLE001
             np.fft.fft(np.zeros(g.nfft, np.complex128))
-        self._tau0 = {}
-        self.df_prev = 0.0
 
     # -- the window this Subframe needs ------------------------------------
     def window_needed(self, t0):
         g = self.g
         return t0 + self.off + g.gi + (g.nsym - 1) * (g.nfft + g.gi) + g.nfft
+
+    def _cp_timing(self, seg, y, t0, span):
+        """Samples to move the Subframe's FFT windows by, from the fold of
+        x[n] conj x[n+N] over the guard: the peak is the true guard start, and
+        the window goes to peak + GI - TIMING_MARGIN.  0 when the fold is weak
+        or the Frame window has no room."""
+        g = self.g
+        step = g.nfft + g.gi
+        N = g.nfft
+        L = len(seg) - N
+        nsy = L // step
+        if nsy < 3:
+            return 0
+        m = nsy * step
+        # the same statistic as m2_stage_b.cp_profile folded modulo the symbol
+        # period, computed as folded sums: one product pass over the segment,
+        # then an 17,920-sample circular sliding sum (E134b: 140 -> ~10 ms)
+        a = seg[:m]
+        b = seg[N:N + m]
+        fp = (a * np.conj(b)).reshape(nsy, step).sum(axis=0)
+        fw = (np.abs(a) ** 2 + np.abs(b) ** 2).reshape(nsy, step).sum(axis=0)
+        cp_ = np.cumsum(np.concatenate([np.zeros(1, fp.dtype), fp, fp[:g.gi]]))
+        cw_ = np.cumsum(np.concatenate([np.zeros(1, fw.dtype), fw, fw[:g.gi]]))
+        corr = cp_[g.gi:g.gi + step] - cp_[:step]
+        ener = cw_[g.gi:g.gi + step] - cw_[:step]
+        fold = np.abs(corr) / np.maximum(ener, 1e-30)
+        pk = int(np.argmax(fold))
+        med = float(np.median(fold))
+        if fold[pk] < TIMING_MIN_SCORE * max(med, 1e-30):
+            return 0
+        if pk > step // 2:
+            pk -= step
+        shift = pk - TIMING_MARGIN
+        lo = -(t0 + self.off)
+        hi = len(y) - (t0 + self.off + span)
+        return int(max(lo, min(hi, shift)))
 
     def pool(self, y, t0, rep=None):
         """Equalised cells of the Subframe in cell order, plus who owns each."""
@@ -223,6 +270,19 @@ class SubframeDecoder:
         step = g.nfft + g.gi
         span = g.gi + (g.nsym - 1) * step + g.nfft
         seg = y[t0 + self.off:t0 + self.off + span]
+        # E134: the Subframe's own symbol boundary, from the cyclic-prefix fold
+        # of its own samples -- the decoder assumed the guard ends at
+        # t0 + off + GI, and on this air that was ~180 samples early with a
+        # usable guard ~300 samples wide (E133 scan: 1-3 Blocks lost per
+        # Frame; 150-200 samples later, all 117 at half the iterations).
+        # Pure function of the Frame; nothing carried between Frames.
+        tshift = 0
+        if TIMING_ON:
+            tshift = self._cp_timing(seg, y, t0, span)
+            if tshift:
+                seg = y[t0 + self.off + tshift:t0 + self.off + tshift + span]
+        if rep is not None:
+            rep["timing_shift"] = int(tshift)
 
         def ffts(sig):
             base = sig[g.gi:]
@@ -235,16 +295,15 @@ class SubframeDecoder:
                 Y = np.fft.fft(W, axis=1)
             return np.fft.fftshift(Y, axes=1)
 
-        # FEED-FORWARD: last Frame's residual offset is applied before the
-        # first transform (the drift is ~1 Hz/s, a Frame is a quarter second),
-        # so the second transform below is needed only when the residual
-        # measured afterwards is still over a hertz -- a jump, not steady
-        # drift.  Each decode process tracks its own; on the gate's isolated
-        # Frames the first one pays the second pass and the next inherit it.
-        df_prev = float(getattr(self, "df_prev", 0.0))
-        if abs(df_prev) > 0.5:
-            n_ = np.arange(span, dtype=np.float64)
-            seg = seg * np.exp(-2j * np.pi * df_prev * n_ / M13.FS_POST)
+        # E132: NO feed-forward.  The earlier version applied last Frame's
+        # residual before the first transform and let each decode process
+        # carry its own -- so a Frame's result depended on which Frames that
+        # worker had seen before, and the PLP 1 count moved run to run
+        # (13.29: 9317-9336 of 9360 on one bank).  E85's rule: a worker
+        # decides nothing it carries between Frames.  Every Frame now measures
+        # its own residual on the first transform and pays the second
+        # transform itself when it is over CFO_REDO_HZ.  One FFT pass more per
+        # Frame on a drifting tuner; the same bytes from any layout.
         _pc = time.perf_counter
         _t = _pc()
         Yb = ffts(seg)
@@ -274,18 +333,17 @@ class SubframeDecoder:
             if abs(acc) > 0:
                 tsym = step / M13.FS_POST
                 df = float(np.angle(acc)) / (2.0 * np.pi * self.dy * tsym)
-                if abs(df) > 1.0:          # a jump: rotate the rest out and transform again
-                    n_ = np.arange(span, dtype=np.float64)
-                    seg = seg * np.exp(-2j * np.pi * df * n_ / M13.FS_POST)
-                    Yb = ffts(seg)
-                    self.df_prev = df_prev + df
-                else:
-                    self.df_prev = df_prev + df   # fold the small residual into next Frame's feed-forward
+        applied = 0.0
+        if self.track_cfo and abs(df) > CFO_REDO_HZ:
+            n_ = np.arange(span, dtype=np.float64)
+            seg = seg * np.exp(-2j * np.pi * df * n_ / M13.FS_POST)
+            Yb = ffts(seg)
+            applied = df
         self.tm["sf1_pool_cfo"] += _pc() - _t
         _t = _pc()
         if rep is not None:
             rep["cfo_resid_hz"] = df
-            rep["cfo_applied_hz"] = df_prev
+            rep["cfo_applied_hz"] = applied
         # THE CHANNEL ESTIMATE FOR EVERY SYMBOL, in four batched transforms
         # instead of seventy-five: symbols with the same pilot pattern (the
         # SBS ones, and each parity l mod dy) share a comb, so their pilot
@@ -295,19 +353,16 @@ class SubframeDecoder:
         Hcomb = {}
         noc, nfft = self.noc, g.nfft
         if self.comb:
-            tau_cache = getattr(self, "_tau0", None)
-            if tau_cache is None:
-                tau_cache = self._tau0 = {}
+            # E132: no per-group delay seed carried from earlier Frames (it was
+            # the second piece of per-worker state); the denoiser seeds its
+            # search from this Frame's own transform.
 
             def comb_group(item):
                 key, grp = item
                 ls = grp["ls"]
                 hp_all = np.stack([Yb[l][grp["bins_pk"]] / grp["refpk"] for l in ls], axis=1)   # (npk, ng)
                 hv = hp_all[grp["on"]]                                                          # the regular comb
-                Hf, used_g, tau = M16.comb_denoise_grid(hv, grp["D"], nfft, min_period=self.min_period,
-                                                        tau0=tau_cache.get(key), return_tau0=True)
-                if tau is not None:
-                    tau_cache[key] = int(np.bincount(np.asarray(tau, int) - int(tau.min())).argmax() + tau.min())
+                Hf, used_g = M16.comb_denoise_grid(hv, grp["D"], nfft, min_period=self.min_period)
                 out = []
                 r, nfull = grp["r"], Hf.shape[1]
                 for gi_, l in enumerate(ls):
@@ -420,6 +475,7 @@ class SubframeDecoder:
         tm["sf1_ldpc"] += pc() - t
         rep["ldpc_iters_mean"] = float(np.mean(its))
         rep["ldpc_iters_max"] = int(np.max(its))
+        rep["bad_fail"] = [int(x) for x in np.asarray(bad)[~np.asarray(conv, bool)]]   # syndrome weight of each failed Block
         t = pc()
         try:
             syn, by = fd.baseband_batch(bits, self.ch)

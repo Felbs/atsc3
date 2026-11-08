@@ -2962,3 +2962,272 @@ The supervisor no longer restarts an LDM chain for re-acquiring; tonight's overn
 first thing to read tomorrow is `soak_night/atsc3_run.log`.  Left open: restart 1's branch, the
 caption worker's rc=1 (both answered by the logs from now on), the A-CPL upmix, the LDPC, and
 the yagi, which needs a person.
+
+### 13.28 The OnAir fork begins: their November receiver built here and raced on both carriers (2026-11-08)
+
+Felbs' order of work from here: the OnAir fork first, then OnAir's gain-servo ideas into
+gr-rxtune (hold while locked, re-run on triggers, revert a step that hurt -- and NOT their
+MER/SNR objective), then ATSC 1.0 with that policy.  The plan and the licence rule are in
+`docs/ONAIR_FORK.md`; this section is the first measurement.
+
+**Survey** (upstream 25034214, 2026-11-04; 3,305 commits, one author on `core/src/atsc3`):
+C++20 receiver library + ImGui app, Rust protocol layers required to build, every receiver ends
+in an MPEG-TS for their FFmpeg player.  ATSC 3.0 is 8.7k lines: bootstrap with CFO, L1, every
+Subframe, CTI, LDPC 16200/64800 (GPU on Windows and macOS), ALP, IP, ROUTE.  **No MMTP** ("not
+supported yet"), **no LDM** beyond parsing the injection field, AC-4 only through libavcodec,
+tests on their own generator with impairments, and a README asking for real recordings.  Built on
+this box the way their README says (MSYS2 UCRT64 + Rust): 12 minutes, 1,391 targets, no errors.
+
+**The race, same two 20 s banks, one run after the other** (their `atsc3rx` 12 threads, ours 8
+processes; `C:\captures\onair\race.txt`):
+
+| bank | | OnAir 2026-11-04 | ours |
+|---|---|---|---|
+| RF33 (`rf33_win_20s`, Antenna B) | wall | **7.1 s, 2.8x** | 13.4 s, 1.47x |
+| | Blocks PLP 0 / 1 / 16 | 5920 / **9360/9360** / 80 -- 15,360 baseband packets, 0 bad | 5920 / **9333/9360** / -- |
+| | services | 10 found, 9 ROUTE into a 7.07 MB TS; WJLA 7.1 "MMTP (not supported)" | WJLA 7.1 playing lanes, eng + spa, captions |
+| RF25 (`rf25_s3_antA`, Antenna A, LDM) | wall | 23.7 s, 0.8x ("frame cut and resampling" 15.5 s) | **9.1 s, 2.19x** |
+| | Core layer | 3,130 baseband packets, 0 bad, 0 frames failed | 2,835/2,835 Blocks, phase locked on Frame 0 |
+| | services | **0 service list tables, 0 bytes, exit 2** | 37 MPUs, lanes written |
+
+Three facts.  (1) Since the 13.2 race two days ago their PLP 1 bursts are gone (9046 -> 9360)
+and they are 1.9x faster than us on RF33 -- our speed claim from 13.2 no longer holds against
+their current code, and we left 27 PLP 1 Blocks that they did not: an item for our list.
+(2) On RF25 their plain-PLP path carries the whole Core layer out (the Enhanced layer is -5 dB
+noise to it, as 13.25 predicted) and then resolves no service list, so nothing plays; the fastest
+path to RF25 on OnAir is signalling and MMTP, not physics.  (3) Their time on RF25 goes to
+resampling 6.912 Msps into their frame cutter; ours bypasses the resampler at the native rate
+and is 2.6x faster there.  Where the fork earns its keep is unchanged: MMTP (WJLA and the RF25
+Core-layer service are both MMTP here), AC-4, LDM's Enhanced layer, and recordings from real air.
+
+**The first fork change, an hour later.**  Their 0 service list tables on RF25 were not the
+physics: the 20 s hold 40 LLS datagrams (224.0.23.60:4937), the same count as RF33, but on RF25
+every one is a **SignedMultiTable** (LLS_table_id 0xFE, 20 of them) or UserDefined (0xFF, 20), and
+their `parseLls()` accepted tables 1-5 only.  Their generator never makes a 0xFE, so no test could
+have shown it; our E69 read the same container on RF30 in August (count, then count x {id,
+version, 16-bit length, gzip}, then a 16-bit signature length and a CMS signature).  Written
+fresh in C++ for the fork (branch `felbs/real-air` of the upstream clone, commit 699015b6, GPL):
+`parseLls()` walks the container and returns the SLT inside, `makeLlsMulti()` builds one for the
+tests, the unit test covers the SLT inside, a container without an SLT, truncation (and caught
+my first version, which stopped at the SLT and misread the signature length).  Their 25 ATSC 3.0
+tests pass.  Rerun on the bank: **20 service list tables, 12 services** (45.1 WBFF, 54.1 WNUV,
+2.1 WMAR, 11.1 WBAL, 22.1 WMPT, ...) where there were none -- and still 0 bytes of transport
+stream, for a reason the datagrams state: the SLT puts every ROUTE service's signalling at
+239.255.N.1:8000 (WBFF 239.255.45.1, WMAR 239.255.2.1, WBAL 239.255.11.1), and **none of those
+addresses occurs among the 10,040 Core-layer datagrams**.  The ROUTE services ride the Enhanced
+layer.  The Core carries one MMTP service -- 239.255.54.1:8000, 7,373 datagrams -- plus a few
+small ROUTE flows (239.255.45.100:5000 TSI 10, 239.255.54.1:5100), and the SLT names that MMTP
+flow: **service 5007, 54.1 WNUV**.  So the picture this receiver has shown from RF25 since
+8/08 is WNUV's (the CW affiliate) on WBFF's lighthouse, not WBFF's own; where these notes say
+"Fox" for the RF25 service, read "the service on WBFF's RF25 Core layer, WNUV 54.1".  For OnAir
+the consequence is exact: on this carrier it can play nothing until it has either MMTP (the
+Core) or the Enhanced layer (the ROUTE services), and MMTP is the one that does not need 12 dB
+more antenna.
+
+### 13.29 The speed items: where OnAir's 1.9x came from, and two fixes that take it back (2026-11-08)
+
+Felbs: "get started with 1, 2 and 3 in that order" -- a C kernel for the subframe-1 per-cell
+stages, an int8 sixteen-lane LDPC, then more processes.  The first measurement withdrew item 1
+and reordered the rest; this section is the measurements, in the order they were made.
+
+**Standalone, the PLP 1 decode is already fast.**  `lab/m17_plp1_live.py` alone on the RF33 bank,
+two threads: 0.40-0.43 s per Frame -- pool 160-195 ms, CPE 69, demap 52, LDPC 62-65 (117 Blocks
+of 64800, 2.2 iterations mean), BCH 13.  The same stages inside the live pool at 8 x 2 read pool
+280, CPE 134, demap 66, **LDPC 450-480**.  So the live chain's cost is not Python around C; the C
+itself runs 2-7x slower when eight copies run.  (Note for the record: the box is a Threadripper
+**3970X**, 32 cores, uniform memory, 128 GB -- not the 2990WX earlier notes assumed.)
+
+**Independent processes, same curve.**  N standalone decoders at once, no shared queue, no shared
+memory, median per-Frame stage times:
+
+| decoders running | pool | CPE | demap | LDPC |
+|---|---|---|---|---|
+| 1 | 160 | 69 | 52 | 62 |
+| 4 | 197 | 90 | 57 | 124 |
+| 8 | 250 | 124 | 64 | 226 |
+| 16 | 402 | 226 | 69 | 356 |
+
+Four decoders pinned one per core complex: LDPC 74 ms.  The same four packed into one complex
+(16 logical CPUs): 134.  Into four cores: 204.  Pinning the live pool to each 16-CPU group in turn
+gave the same 16-18 s on every group, so no die is "far" from memory: it is cache capacity, and
+the float32 eight-lane kernel's working set is 1.4 MB per 64800-bit Block (`tot` n x 8 x 4 B +
+`msg` 279k edges x 8 x 4 B, shared by eight) -- 8 workers x 2 groups do not fit.  Total CPU for
+the 20 s bank (psutil over every descendant): 20 s cut 260 s, 10 s cut 201 s -> **1.5 s of CPU per
+Frame for the decode** and ~140 s of start-up (eight workers each building 110 frequency-
+interleaver sequences in pure Python, 9.5 s apiece -- a separate item, tune-in latency).  OnAir's
+`atsc3rx`: 71 s of CPU for the same Frames.
+
+**Fix 1 -- placement (committed 130ba75, 8a73e71).**  `ATSC3_WORKER_SPREAD=G` pins worker i to
+logical-CPU group i mod G, in both pools (`m11_watch._decode_proc_main`, `m44_ldm._demod_worker`).
+The scheduler was not spreading them.
+
+| bank, 8 x 2 | unpinned | spread 4 | spread 8 |
+|---|---|---|---|
+| RF33 20 s | 13.4 s (1.47x) | 11.9 s | **10.5-10.6 s (1.87x)** |
+| RF25 45 s (`rf25_win_45s_b`) | 26.7 s (1.68x) | 23.2 s | **20.1 s (2.23x)**, twice |
+
+Blocks and the video lane's sha identical in every layout.  Placement only; `tools/soak_overnight.sh`
+exports G=8 for tonight.
+
+**Fix 2 -- narrower lanes (E130, E131).**  Item 2 as given was int8 sixteen lanes, OnAir's layout
+(their `atsc3_ldpc.cpp`; idea credited in NOTICE).  Built (`ldpc_layered_q8`, ABI 5; posteriors
++-96, messages +-31, no two-minimum correction) and refereed on the E121 first-rung records with
+`lab/gate_e130_q8.py`: at its best scale int8 alone converges **689 of the float32 kernel's 772**
+on the strong records and 129 of 230 at 12 dB -- the 1-unit step and the missing correction cost
+11-44 % at the cliff.  A hybrid (int8 first, float32 on the rest) loses nothing and keeps every
+byte, but near the cliff the float32 pass dominates: RF33 chain 10.6 -> 9.0 s, RF25 12 dB bank
+29.9 -> 31.9 s.  Kept in the file, off.
+
+So **int16** (`ldpc_layered_q16`, ABI 6): sixteen lanes in one AVX2 vector, the batch's mean |LLR|
+at 1024 units (a step of 0.1 % of the mean), posteriors +-24576 and messages +-8191 so their
+difference never overflows, saturating arithmetic, alpha in Q15, and the E110 correction kept --
+computed per check on the two minima in float32 (16 values, not per edge) and rounded back.  Half
+the float32 footprint, 0.69 MB per Block.  The referee:
+
+| records (RF25 Core 9/15, alpha 0.82) | float32 + box-plus | int16 at 1024 | lost | bytes on shared | ms per record |
+|---|---|---|---|---|---|
+| strong, 948 Blocks | 772 | **775** | 0 | identical | 101 -> **70** |
+| 12 dB, 605 Blocks | 230 | **265** | 0 | identical | 159 -> **102** |
+
+More Blocks, none lost, faster even single-process (less memory per sweep).  At 4096 units the
+posterior clamp costs 178 Blocks; 256 is a hair worse than 1024; 1024 it is.  Whole chain, 8 x 2
+spread over 8, every converged Block BCH-clean:
+
+| bank | float32 kernel | int16 kernel |
+|---|---|---|
+| RF33 20 s | 10.6 s (1.87x), PLP 0 5920 | **9.7 s (2.04x)**, 5920, video bytes identical |
+| RF25 45 s strong | 20.1 s (2.23x), 4850/5986 | **17.9 s (2.51x), 4887/5986** |
+| RF25 45 s at 12 dB | 29.9 s (1.50x), 1390/5250 | **27.5 s (1.63x), 1551/5250** |
+
+`ATSC3_LDPC_Q16=1` is the default from 8dc5355; `0` restores float32.  The LDM pool's Block count
+is the same at 8, 12 and 16 workers (4887), i.e. deterministic; the RF33 PLP 1 count is not (next
+paragraph).
+
+**Item 3 -- more processes.**  With both fixes: RF33 8 x 2 9.7 s, 12 x 2 10.6, 16 x 2 11.2;
+RF25 8 x 2 17.9 s, 12 x 2 19.4, 16 x 2 20.5.  Eight remains the number on this box; the footprint
+still bounds it.  The next lever is the demod itself: the samples arrive complex64 and are widened
+to complex128 at `m9_fast` line 141, and every pool stage (FFT, CFO, estimate combine, the f64
+equaliser kernel) runs in 16 bytes per cell -- the pool stage is now the largest at 8 workers
+(RF33 sf1_pool 265 ms vs LDPC 207).  A complex64 demod halves that footprint; it changes the
+LLRs in the last bits, so it needs the converged-set / shared-bytes gate, not the sha.  Not started.
+
+**Where we stand against OnAir on this box.**  Their `atsc3rx` on the RF33 bank: 7.1-10.8 s run
+to run (GPU on or off makes no difference; the spread is theirs).  Ours: 9.7 s, stable to 0.2 s.
+The gap of the morning (13.4 vs 7.1) is 9.7 vs 7.1-10.8.
+
+**Not a speed item: the PLP 1 count moves.**  9317-9336 of 9360 across today's RF33 runs with the
+same input (OnAir: 9360).  Two pieces of per-worker memory in `m17_plp1_live.py` make a Frame's
+result depend on which Frames that worker saw before: the residual-CFO feed-forward `df_prev`
+("each decode process tracks its own") and the comb estimate's `_tau0` seed cache.  Both break the
+rule the LDM pool is built on (E85: a worker decides nothing it carries between Frames).  The fix
+is a self-sufficient Frame -- estimate from its own pilots, rotate, transform again; seed the
+delay search from a fixed default -- about one FFT per Frame, with the E123 gate (same bank, two
+layouts, two runs, identical counts and bytes).  Only then can the 27 missing Blocks be read.
+
+### 13.30 PLP 1 made deterministic, then whole: 9360 of 9360 (2026-11-08)
+
+Felbs: "do the PLP 1 fix".  13.29 had found the count moving run to run (9317-9336 of 9360 on
+one bank) and named the suspects: two pieces of per-worker memory in `lab/m17_plp1_live.py`.
+Code: 6377d98 (E132-E134), the m44 probe knob in the commit that carries this section.
+
+**E132 -- a worker decides nothing it carries between Frames.**  The residual-CFO feed-forward
+(`df_prev`: last Frame's measured offset applied before this Frame's first transform, per decode
+process) and the comb denoiser's per-group delay seed (`_tau0`) are gone.  Every Frame measures
+its own residual on the first transform and, when it exceeds 0.5 Hz (`CFO_REDO_HZ`), rotates and
+transforms again itself; the denoiser seeds its delay search from the Frame's own transform.  Four
+runs over three layouts (8 x 2 twice, 4 x 4, 16 x 1): **one per-Frame sequence**, and the count
+rose to 9344 -- the carried correction had been hurting as well as wandering.
+
+**E133 -- the 16 that remained, read instead of guessed.**  The per-Frame log line now says why
+(residual and applied CFO, LDPC iterations, pilot coherence, the syndrome weight of each failed
+Block): all 16 were near misses, 2-10 unsatisfied checks at the 50-sweep cap, in Frames 15-30,
+with the carrier offset corrected and the pilots coherent -- and the LDPC's mean iterations there
+3.6-5.3 against 1.9-2.2 elsewhere, so the cells were worse, not the decoder.  The standalone
+decoder (`m17_plp1_live.py` main, its own loader) over the same seconds: 117/117 on all sixteen
+Frames at 1.9 iterations.  So the live chain's *input* to the Subframe differed.  The failing
+Frames' exact windows and start samples were banked from the live workers (`ATSC3_SF1_DUMP`) and
+replayed offline (`lab/e133_sf1_replay.py`, `e133_sf1_probe.py`, `e133_sf1_scan.py`):
+
+| on the banked live windows | converged of 1287 (11 Frames) |
+|---|---|
+| as the live chain had them | 1271 (the live result, reproduced exactly) |
+| through the standalone loader's 2.95 MHz band limit | 1275 |
+| FFT windows moved **later** by +20 / +40 / +100 / +150 / +200 samples (two Frames) | 117/117 at every shift from +40; iterations 3.6-4.0 -> 1.8-2.0 at +150 |
+| moved earlier by -20 / -40 / -100 / -200 | 115-116 / 114-116 / 110-112 / 96-102 |
+| +300 and beyond | 0 (out of the guard) |
+
+The cyclic-prefix fold of each Frame's own Subframe-1 samples (x[n] conj x[n+N] over the guard,
+folded modulo the symbol) put its peak -- the true guard start -- **177 and 195 samples after**
+the start the decoder assumed, with the region above 90 % of the peak only ~310 samples wide of a
+1536-sample guard: a channel whose delay spread uses most of the guard, so the window must sit
+near the true guard end, and the assumed one sat ~180 samples early at the edge of the usable
+zone.  Not the LDPC, not the CFO, not the band limit: the FFT window.
+
+**E134 -- the Subframe places its own windows.**  Per Frame, the fold (computed as folded sums:
+one product pass over the segment, then a 17,920-sample circular sliding sum, ~10 ms) gives the
+peak, and the FFT windows start at peak + GI - 32 (`TIMING_MARGIN`; `ATSC3_PLP1_TIMING=0` turns
+it off).  A pure function of the Frame.  RF33 bank, 8 x 2 twice and 4 x 4: **9360/9360**, one
+per-Frame sequence, iterations 2.06 mean in the once-failing Frames, PLP 0 bytes identical, wall
+9.8 s (2.01x) -- the fold's first version cost 140 ms a Frame and 10.6 s; the folded-sum version
+costs the 0.1 s.  Across the 80 Frames the shift ran -65 to +183 samples (median +45): the
+assumed boundary wanders Frame to Frame, which the per-Frame fold absorbs.  OnAir's 9360 is
+matched; it was never the decoder's cliff.
+
+**E135 -- the same question asked of the LDM path, answered no.**  `ATSC3_LDM_TSHIFT` (a probe
+knob on the data windows in `m44_ldm.cell_pool`) swept on the strong RF25 bank: 0 is the optimum
+(4887 Blocks; -30 4852, +30 4670, +60 3721, +200 537) -- the LDM demod's pilot-coherence fine
+timing already sits on its 512-sample guard's peak.  RF25's 81 % is the air (13.25: Core-layer
+SNR), not timing.
+
+**Where ATSC 3.0 stands tonight.**  RF33: both PLPs 100 % on the bank (5920 + 9360), 2.0x on
+eight workers, deterministic from any layout, live television with both audio languages and
+captions.  RF25: the Core layer live at 2.5x on the bank with every converged Block BCH-clean,
+the Enhanced layer still 11-13 dB of antenna away.  Open and known: the demod's complex128 (speed),
+each worker's ~17 s of pure-Python start-up (tune-in latency), the A-CPL upmix, the yagi.  Next,
+by Felbs' order: gr-rxtune takes OnAir's three servo ideas.
+
+### 13.31 Everything from today, live on both carriers before the sonde hunt (2026-11-08, 17:14-18:35)
+
+Felbs: "why don't we use all of the changes we made in the soak right now?  I kinda wanna stress
+test the new changes.  Make sure they work on every channel.  And doesn't break any of our
+telemetry."  So, the whole stack with every change of the day -- worker placement (13.29), the
+int16 LDPC (E131), the deterministic and self-timing PLP 1 (E132-E134), the supervisor's fade
+detector on the LDM line and its own log (13.27) -- on RF33 and then RF25, each the full orchestrator
+with viewer, both audio workers and captions, closed by the script, the radio handed back at 18:35
+for the 18:40 sonde hunt.  `tools/soak_overnight.sh` took `RF` and `CHAIN_EXTRA` from the
+environment for it (d6753ff).
+
+**A false start, mine.**  The first RF33 run was pointed at Antenna A: bootstrap locked at peak
+ratio 66-86, FEC 0 of 35,668, re-acquiring every eight Frames, the orchestrator gave up at 150 s
+with no video lane.  RF33 has only ever been received on Antenna B with its LNA (`watch_tv.bat`);
+a strong bootstrap with zero payload is what a wrong antenna or an overloaded front end looks like
+(E129), and no code was involved.  Killed by PID, restarted on Antenna B.
+
+| | RF33, Antenna B, 17:14-17:54 | RF25, Antenna A, 17:54-18:35 |
+|---|---|---|
+| chain | 9,642 Frames at **1.00x**, 8 x 2 spread over 8 | 9,784 Frames at **1.00x**, LDM pool 8 x 2 spread over 8 |
+| PLP 0 / Core | 713,487 / 713,508 Blocks (99.997 %) | 319,534 / 333,930 (95.7 %) |
+| PLP 1 (per-Frame log) | 1,123,902 / 1,129,986 (99.46 %); 116 of 9,658 Frames short, in two fades (coherence 0.992-0.995, dozens of Blocks down together); timing shift -2 to -31 samples tonight | -- |
+| lock / acquisition | one bootstrap re-acquisition at start (an SDR overflow), none after | 11 CTI lock losses, every one 17:55-18:00 (a six-minute fade), all re-acquired |
+| supervisor (`atsc3_run.log`) | 0 restarts, 0 strikes | **0 restarts**; `LANE(S) DEAD` struck 5 times, each cleared at the next tick -- see below |
+| viewer | 392 chunks, 2,348 s out, **0 dropped, 0 fails**, no write over 1 s, lag 22-28 s | 387 chunks, 2,318 s, 4 dropped, 0 fails; one re-anchor at 18:00:41 (126 s behind after the fade) and one player respawn at 18:04:39 (the 20 s / q 4 rule), both the viewer's own recovery |
+| audio | 60,349 frames, 0 bad, 191 pads, 0 respawns; 5.1 as AC-3 | 56,037 frames, 0 bad, 1,023 pads, 0 respawns; stereo mp2 (ASPX_ACPL_3) |
+| captions | 3,008-line srt; `atsc3_subs.log` 350 lines, no error | 3,024-line srt; no error |
+| memory | 8.6-8.8 GB, flat | 4.4-4.5 GB, flat |
+| close | 0 leftovers in 8 s | 0 leftovers in 6 s |
+
+**What the telemetry showed that the morning could not.**  With the supervisor's log kept, its
+decisions during the RF25 fade are on record: at 18:00:36 it reached "candidate wedge -- allowing
+in-chain self-heal (1/4)", at 18:00:41 "LANE(S) DEAD: audio_pid5018, audio_pid5019 unchanged while
+2 lane(s) still write (4/3) ... (2/4)", at 18:00:46 "recovered".  So the branch behind the
+morning's unexplained restart 1 (13.27) is named: in a degraded carrier the audio lanes pause
+while video and captions still write, and the rule written for the 8/07 flipped-bit case (FEC at
+100 %, one asset dead) read it as a dead asset.  It recovered inside the grace here; in the Antenna
+B soak it did not.  Fixed in 8746d09: the branch asks the chain's interval FEC first and, under
+90 % (`LANE_DEAD_FEC`), logs the quiet lane as the air and counts no strike.  Not exercised live
+yet (the running supervisor predates it); tonight's soak runs it.
+
+**Where it stands.**  Both carriers, the whole stack, every change of the day, 1.00x each, nothing
+broken in the telemetry -- the telemetry got richer (the per-Frame PLP 1 line, the supervisor's and
+the caption worker's logs).  The overnight soak (Antenna A, 20:30-06:30) runs the same code plus
+the lane rule.
