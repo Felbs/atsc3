@@ -731,7 +731,7 @@ def _layered_lib():
                 cand = ctypes.CDLL(path)
                 cand.ldpc_layered_abi.restype = ctypes.c_int32
                 abi = int(cand.ldpc_layered_abi())
-                if abi not in (3, 4, 5, 6):
+                if abi not in (3, 4, 5, 6, 7):
                     raise OSError("layered kernel ABI mismatch (rebuild: python lab/build_ldpc_layered_kernel.py)")
                 i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
                 f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
@@ -767,6 +767,13 @@ def _layered_lib():
                         ctypes.c_int32, i32, i32, ctypes.c_int32, ctypes.c_float,
                         ctypes.c_float, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
                         ctypes.c_int32, u8, u8, i32, i32, i16]
+                # E136: ABI 7 keeps E131 as ldpc_layered_q16_ref (the referee) and adds q16c,
+                # the same decoder with the check-node messages stored compressed
+                cand.has_q16c = abi >= 7
+                if cand.has_q16c:
+                    for fn in (cand.ldpc_layered_q16_ref, cand.ldpc_layered_q16c):
+                        fn.restype = ctypes.c_int32
+                        fn.argtypes = cand.ldpc_layered_q16.argtypes
                 lib = cand
             except OSError as ex:
                 if not _LAYERED_STATE["logged"]:
@@ -832,6 +839,14 @@ Q8_ITERS = int(os.environ.get("ATSC3_LDPC_Q8_ITERS", "16"))
 Q16_DEFAULT = os.environ.get("ATSC3_LDPC_Q16", "1")
 Q16_LANES = 16
 Q16_MEAN = float(os.environ.get("ATSC3_LDPC_Q16_MEAN", "1024"))
+#: E136: which int16 kernel.  "dense" = E131 with the faster load and syndrome (messages
+#: nedges x 16 int16); "packed" = the same decoder with the check-node messages stored as two
+#: magnitudes and an index per check and a sign mask per edge (5.1 MB a vector instead of
+#: 11.2 MB on the 64800-bit 9/15 code); "ref" = E131 as it shipped.  All three return the
+#: same bits, conv, its and bad on every block (lab/gate_e136_q16.py).  "packed" is the
+#: default: eight workers at once, each on its own cache complex, 61-65 ms a 35-Block call
+#: against 112-126 for E131 and 105-112 for "dense" (PRIOR_ART.md s13.33).
+Q16_KERNEL = os.environ.get("ATSC3_LDPC_Q16_KERNEL", "packed")
 
 
 def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=None, abort=None, pack=None):
@@ -864,12 +879,19 @@ def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=N
         mean = float(np.mean(np.abs(llr))) if llr.size else 1.0
         scale16 = np.float32(Q16_MEAN / mean) if mean > 0 else np.float32(1.0)
 
+        kern, nwork = lib.ldpc_layered_q16, (n + nedges) * Q16_LANES
+        if getattr(lib, "has_q16c", False):
+            if Q16_KERNEL not in ("dense", "ref"):
+                kern, nwork = lib.ldpc_layered_q16c, n * Q16_LANES + nc * 48 + nedges
+            elif Q16_KERNEL == "ref":
+                kern = lib.ldpc_layered_q16_ref
+
         def one_q16(lo):
             hi = min(lo + Q16_LANES, nblk)
-            work = np.empty((n + nedges) * Q16_LANES, np.int16)
-            return lib.ldpc_layered_q16(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
-                                        int(iters), np.float32(alpha), scale16, int(corr), ak, at, ast,
-                                        bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
+            work = np.empty(nwork, np.int16)
+            return kern(llr[lo:hi], hi - lo, n, nc, nedges, cptr, cidx,
+                        int(iters), np.float32(alpha), scale16, int(corr), ak, at, ast,
+                        bits[lo:hi], conv[lo:hi], its[lo:hi], bad[lo:hi], work)
         los = list(range(0, nblk, Q16_LANES))
         rcs = list(ex.map(one_q16, los)) if ex is not None else [one_q16(lo) for lo in los]
         if any(rc != 0 for rc in rcs):

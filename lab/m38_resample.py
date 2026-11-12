@@ -70,6 +70,103 @@ def resample(x, up=UP, down=DOWN):
                             for c in range(x.shape[1])])
 
 
+class StreamResampler:
+    """The same 1001/960 resampling, fed in pieces of any size.
+
+    `resample()` treats each call as a complete signal: the filter sees
+    zeros beyond both ends, so the first and last 10 input samples of every
+    call are computed against silence instead of their real neighbours.  A
+    live worker calls it once per pass, which left a small error at every
+    pass boundary (2.5 % of the signal on white noise, measured by the gate
+    below) -- every 8 s, and every 2 s once the passes are shortened for a
+    quick start.
+
+    This class keeps the input it still needs and gives the SAME samples no
+    matter how the input is split (`--stream-gate` below proves it against
+    one call over the whole signal).  It is causal: the output is the
+    one-shot output delayed by DELAY input samples (0.35 ms at 46034 Hz),
+    which is what lets it emit every sample a pass is owed without waiting
+    for the next pass -- the muxer's audio hold asks "does the wav cover
+    this slot", and a resampler that held 10 samples back would answer "no"
+    for a whole extra pass.
+
+    After n input samples in total, exactly ceil(n * up / down) output
+    samples have been returned -- the same count resample() gives -- so the
+    wav timeline is unchanged.
+    """
+    DELAY = 16      # input samples; resample_poly's filter reaches 10 each way
+    KEEP = 32       # input samples of history kept ahead of the next output
+
+    def __init__(self, up=UP, down=DOWN):
+        self.up, self.down = up, down
+        self.buf = None         # delayed input from index `base` onwards
+        self.base = 0           # always a multiple of `down` (phase 0)
+        self.n_in = 0           # input samples taken so far
+        self.n_out = 0          # output samples returned so far
+
+    def push(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        if self.buf is None:
+            self.buf = np.zeros((self.DELAY,) + x.shape[1:])
+        self.buf = np.concatenate([self.buf, x])
+        self.n_in += len(x)
+        m_hi = -(-self.n_in * self.up // self.down)         # ceil
+        if m_hi <= self.n_out:
+            return np.zeros((0,) + x.shape[1:])
+        r = resample_poly(self.buf, self.up, self.down, axis=0)
+        m_base = self.base // self.down * self.up
+        out = r[self.n_out - m_base:m_hi - m_base]
+        if len(out) != m_hi - self.n_out:
+            raise RuntimeError("stream resampler came up short: %d of %d"
+                               % (len(out), m_hi - self.n_out))
+        self.n_out = m_hi
+        nb = ((m_hi * self.down // self.up - self.KEEP)
+              // self.down) * self.down
+        if nb > self.base:
+            self.buf = self.buf[nb - self.base:]
+            self.base = nb
+        return out
+
+
+def stream_gate():
+    """Pieces of any size == one call, and == resample() delayed by DELAY."""
+    rng = np.random.default_rng(38)
+    x = rng.standard_normal((300000, 2))
+    whole = StreamResampler().push(x)
+    ok = True
+    for name, cuts in (("2 s passes (92160)", [92160] * 3),
+                       ("one AC-4 frame (1536)", [1536] * 190),
+                       ("ragged", [1, 7, 959, 961, 5000, 13, 1536, 77777])):
+        rs, parts, pos = StreamResampler(), [], 0
+        for n in cuts:
+            parts.append(rs.push(x[pos:pos + n]))
+            pos += n
+        parts.append(rs.push(x[pos:]))
+        y = np.vstack(parts)
+        e = (float(np.abs(y - whole).max()) if y.shape == whole.shape
+             else float("inf"))
+        g = e < 1e-9
+        ok &= bool(g)
+        print(f"  {name:24s} {len(y)} samples, max |diff| vs one call "
+              f"{e:.3g}   {'PASS' if g else 'FAIL'}")
+    d = StreamResampler.DELAY
+    ref = resample(np.vstack([np.zeros((d, 2)), x]))[:len(whole)]
+    e = float(np.abs(ref - whole).max())
+    g = len(whole) == -(-len(x) * UP // DOWN) and e < 1e-9
+    ok &= bool(g)
+    print(f"  equals resample() delayed {d} samples: max |diff| {e:.3g}, "
+          f"length {len(whole)}   {'PASS' if g else 'FAIL'}")
+    one, two = resample(x[:92160]), resample(x[92160:184320])
+    k = len(one)
+    both = resample(x[:184320])
+    e2 = float(np.abs(np.vstack([one, two])[k - 12:k + 12]
+                      - both[k - 12:k + 12]).max())
+    print(f"  (the old per-pass call, for scale: error at a pass boundary "
+          f"{e2:.3g} on unit noise)")
+    print("STREAM GATE PASS" if ok else "STREAM GATE FAILED")
+    return ok
+
+
 def expected_length(n_frames):
     """Exact output sample count for a whole number of AC-4 frames."""
     # 1536 * 1001/960 = 1601.6 -- integral only over groups of 5 frames,
@@ -80,6 +177,9 @@ def expected_length(n_frames):
 
 if __name__ == "__main__":
     import wave, sys, hashlib
+
+    if "--stream-gate" in sys.argv:
+        sys.exit(0 if stream_gate() else 1)
 
     src = sys.argv[1] if len(sys.argv) > 1 else "tv_audio_hf_full.wav"
     dst = sys.argv[2] if len(sys.argv) > 2 else "tv_audio_48k.wav"

@@ -158,7 +158,12 @@ def chain_status(live_dir, since_off=0, n=12):
     p = os.path.join(live_dir, "chain.log")
     try:
         with open(p, "rb") as f:
-            f.seek(since_off)
+            # The LATEST 400 kB of this run, not its first: a status line is
+            # ~150 bytes every 5 s, so the first 400 kB is the first 3.7 h,
+            # and from then on this returned the same frozen Frames and FEC
+            # for ever (a later fade then read as "frames frozen" = wedge).
+            size = os.fstat(f.fileno()).st_size
+            f.seek(max(since_off, size - 400_000))
             txt = f.read(400_000).decode("utf-8", "replace")
     except OSError:
         return None, None
@@ -413,6 +418,16 @@ def main():
                          "acquisition legitimately emits nothing for a while")
     a = ap.parse_args()
     a.live_dir = a.live_dir or os.path.join(ROOT, "data", "atsc3_live")
+    # SIGTERM is how the orchestrator (and tvTuna) stop this supervisor on
+    # Linux.  With no handler the process died on the spot, the `finally`
+    # below never ran, and the chain was left to be killed abruptly or
+    # orphaned with the radio.  Make it the same clean stop as Ctrl-C.
+    if os.name != "nt":
+        import signal
+
+        def _term(*_):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, _term)
     replay = bool(a.extra and "--capture" in a.extra)
     a.python = find_python(a.python) or (sys.executable if replay else None)
     if a.python is None:
@@ -532,6 +547,7 @@ def main():
                                 log(f"  recovered -- {media:.1f} s of media, "
                                     f"{b/1e6:.1f} MB written")
                             last_bytes, strikes, grace_used = b, 0, 0
+                            fade_since = None    # the next fade is timed from its own start
                             last_lanes = lanes
                             continue
                         else:
@@ -569,8 +585,6 @@ def main():
                                          if time.time() - t < GAIN_WIN]
                                 if len(gs) < GAIN_MAX_STEPS:
                                     cur = current_rfgain(a.extra)
-                                    nxt = next((g for g in GAIN_LADDER
-                                                if g != cur), GAIN_LADDER[0])
                                     order = [g for g in GAIN_LADDER if g != cur]
                                     nxt = order[len(gs) % len(order)]
                                     log(f"  NOT A FADE: independent tuner "
@@ -615,6 +629,7 @@ def main():
                                 f"probing with one restart in case the "
                                 f"acquisition is stuck, not the sky")
                             fade_since = None
+                            grace_used = a.grace   # the probe IS the restart: no further grace
                     else:
                         fade_since = None
 

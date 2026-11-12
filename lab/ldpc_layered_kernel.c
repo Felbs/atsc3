@@ -46,7 +46,7 @@
 #define LANES 8
 #define MAX_ROW_DEG 128
 
-EXPORT int32_t ldpc_layered_abi(void) { return 6; }   /* 4: + pack_f32 (E118); 5: + q8 (E130); 6: + q16 (E131) */
+EXPORT int32_t ldpc_layered_abi(void) { return 7; }   /* 4: + pack_f32 (E118); 5: + q8 (E130); 6: + q16 (E131); 7: + q16_ref, q16c (E136) */
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -641,7 +641,11 @@ EXPORT int32_t ldpc_layered_q8(
  * identical on shared blocks).
  *
  * work: (n + nedges) * 16 int16.  returns 0; -1 degree > MAX_ROW_DEG;
- * -2 nblk out of 1..16; -3 no AVX2. */
+ * -2 nblk out of 1..16; -3 no AVX2.
+ *
+ * Since E136 this function is exported as ldpc_layered_q16_ref and is NOT
+ * edited: it is what the faster kernels at the end of the file are gated
+ * against, block for block. */
 #define Q16_LANES 16
 #define Q16_POST 24576
 #define Q16_MSG 8191
@@ -693,7 +697,7 @@ static inline __m256i q16_boxplus(__m256i min1, __m256i min2, float inv, float u
 }
 
 __attribute__((target("avx2,fma")))
-static int32_t layered_q16_avx2(const float *llr, int32_t nblk, int32_t n,
+static int32_t layered_q16_ref_avx2(const float *llr, int32_t nblk, int32_t n,
                                 int32_t nc, int32_t nedges,
                                 const int32_t *cptr, const int32_t *cidx,
                                 int32_t iters, float alpha, float scale, int32_t corr,
@@ -804,6 +808,323 @@ static int32_t layered_q16_avx2(const float *llr, int32_t nblk, int32_t n,
 }
 #endif
 
+EXPORT int32_t ldpc_layered_q16_ref(
+    const float *llr, int32_t nblk, int32_t n, int32_t nc, int32_t nedges,
+    const int32_t *cptr, const int32_t *cidx,
+    int32_t iters, float alpha, float scale, int32_t corr,
+    int32_t abort_k, int32_t abort_t, int32_t abort_stall,
+    uint8_t *bits, uint8_t *conv, int32_t *its, int32_t *bad,
+    int16_t *work)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+        return layered_q16_ref_avx2(llr, nblk, n, nc, nedges, cptr, cidx, iters, alpha, scale, corr,
+                                abort_k, abort_t, abort_stall, bits, conv, its, bad, work);
+#endif
+    (void)llr; (void)nblk; (void)n; (void)nc; (void)nedges; (void)cptr; (void)cidx;
+    (void)iters; (void)alpha; (void)scale; (void)corr; (void)abort_k; (void)abort_t; (void)abort_stall;
+    (void)bits; (void)conv; (void)its; (void)bad; (void)work;
+    return -3;
+}
+
+/* E136 -- the int16 kernel again: the same arithmetic, less traffic.
+ *
+ * ldpc_layered_q16_ref above is E131 as it shipped, kept as the referee: the
+ * kernels below must return its bits, conv, its and bad on every block
+ * (lab/gate_e136_q16.py).  What E136 measured (PRIOR_ART 13.33): a call spends
+ * 75 % of its time in the sweeps, 13 % in the syndrome, 10 % loading the LLRs
+ * one float at a time, and one sweep moves 18 MB of messages for 285 k edges.
+ *
+ *   load      sixteen values of a lane per step, transposed in registers: the
+ *             same product, rounding and clamp as the scalar loop (the build
+ *             keeps -ffp-contract=off, so the product and the half are never
+ *             fused);
+ *   memset    gone: the first sweep takes the messages as zero and writes
+ *             every one of them;
+ *   syndrome  stops as soon as every unfinished lane has an unsatisfied check,
+ *             at the iterations where only "zero or not" is asked (before
+ *             abort_k, the stall rule off, not the last iteration);
+ *   q16c      check-node messages kept as what they are: per check the two
+ *             scaled magnitudes and the index of the first minimum (3 x 16
+ *             int16), per edge one sign bit a lane (one uint16).  A message is
+ *             sign x (edge is the first minimum ? m_first : m_others), rebuilt
+ *             exactly.  Work 5.1 MB a vector for the 64800-bit 9/15 code
+ *             instead of 11.2 MB.
+ *
+ * work: q16   (n + nedges) * 16 int16, as E131;
+ *       q16c  n * 16 + nc * 48 + nedges int16.
+ * returns as E131. */
+#define Q16_SYN_CHUNK 64
+
+#if defined(__x86_64__) || defined(_M_X64)
+/* sixteen LLRs of one lane -> sixteen clamped int16 (round half away from zero, as the scalar loop) */
+__attribute__((target("avx2,fma")))
+static inline __m256i q16_quant16(const float *p, __m256 scalev)
+{
+    const __m256 half = _mm256_set1_ps(0.5f), nhalf = _mm256_set1_ps(-0.5f), zf = _mm256_setzero_ps();
+    const __m256 x0 = _mm256_mul_ps(_mm256_loadu_ps(p), scalev);
+    const __m256 x1 = _mm256_mul_ps(_mm256_loadu_ps(p + 8), scalev);
+    const __m256i q0 = _mm256_cvttps_epi32(_mm256_add_ps(x0, _mm256_blendv_ps(nhalf, half, _mm256_cmp_ps(x0, zf, _CMP_GE_OQ))));
+    const __m256i q1 = _mm256_cvttps_epi32(_mm256_add_ps(x1, _mm256_blendv_ps(nhalf, half, _mm256_cmp_ps(x1, zf, _CMP_GE_OQ))));
+    /* int32 -> int16 saturating (per 128-bit half, so put the halves back in order), then the posterior clamp */
+    const __m256i q = _mm256_permute4x64_epi64(_mm256_packs_epi32(q0, q1), 0xD8);
+    return _mm256_min_epi16(_mm256_max_epi16(q, _mm256_set1_epi16(-Q16_POST)), _mm256_set1_epi16(Q16_POST));
+}
+
+/* r[b] = sixteen values of lane b  ->  r[i] = the sixteen lanes of value i */
+__attribute__((target("avx2")))
+static inline void q16_transpose16(__m256i *r)
+{
+    __m256i a[16], b[16], c[16];
+    int g, k;
+    for (k = 0; k < 16; k += 2) {
+        a[k] = _mm256_unpacklo_epi16(r[k], r[k + 1]);
+        a[k + 1] = _mm256_unpackhi_epi16(r[k], r[k + 1]);
+    }
+    for (g = 0; g < 16; g += 8) {
+        b[g + 0] = _mm256_unpacklo_epi32(a[g + 0], a[g + 2]);
+        b[g + 1] = _mm256_unpackhi_epi32(a[g + 0], a[g + 2]);
+        b[g + 2] = _mm256_unpacklo_epi32(a[g + 1], a[g + 3]);
+        b[g + 3] = _mm256_unpackhi_epi32(a[g + 1], a[g + 3]);
+        b[g + 4] = _mm256_unpacklo_epi32(a[g + 4], a[g + 6]);
+        b[g + 5] = _mm256_unpackhi_epi32(a[g + 4], a[g + 6]);
+        b[g + 6] = _mm256_unpacklo_epi32(a[g + 5], a[g + 7]);
+        b[g + 7] = _mm256_unpackhi_epi32(a[g + 5], a[g + 7]);
+        c[g + 0] = _mm256_unpacklo_epi64(b[g + 0], b[g + 4]);
+        c[g + 1] = _mm256_unpackhi_epi64(b[g + 0], b[g + 4]);
+        c[g + 2] = _mm256_unpacklo_epi64(b[g + 1], b[g + 5]);
+        c[g + 3] = _mm256_unpackhi_epi64(b[g + 1], b[g + 5]);
+        c[g + 4] = _mm256_unpacklo_epi64(b[g + 2], b[g + 6]);
+        c[g + 5] = _mm256_unpackhi_epi64(b[g + 2], b[g + 6]);
+        c[g + 6] = _mm256_unpacklo_epi64(b[g + 3], b[g + 7]);
+        c[g + 7] = _mm256_unpackhi_epi64(b[g + 3], b[g + 7]);
+    }
+    /* c[j] holds lanes 0-7 of values j and 8 + j, c[8 + j] lanes 8-15 of the same two */
+    for (k = 0; k < 8; k++) {
+        r[k] = _mm256_permute2x128_si256(c[k], c[8 + k], 0x20);
+        r[8 + k] = _mm256_permute2x128_si256(c[k], c[8 + k], 0x31);
+    }
+}
+
+__attribute__((target("avx2,fma")))
+static void q16_load(const float *llr, int32_t nblk, int32_t n, float scale, int16_t *tot)
+{
+    const __m256 scalev = _mm256_set1_ps(scale);
+    __m256i r[Q16_LANES];
+    int32_t i = 0, b;
+    for (; i + 16 <= n; i += 16) {
+        for (b = 0; b < nblk; b++) r[b] = q16_quant16(llr + (size_t)b * n + i, scalev);
+        for (; b < Q16_LANES; b++) r[b] = _mm256_setzero_si256();
+        q16_transpose16(r);
+        for (b = 0; b < 16; b++)
+            _mm256_storeu_si256((__m256i *)(tot + ((size_t)i + b) * Q16_LANES), r[b]);
+    }
+    for (; i < n; i++) {
+        int16_t *row = tot + (size_t)i * Q16_LANES;
+        for (b = 0; b < Q16_LANES; b++) {
+            if (b >= nblk) { row[b] = 0; continue; }
+            float x = llr[(size_t)b * n + i] * scale;
+            int32_t q = (int32_t)(x >= 0.0f ? x + 0.5f : x - 0.5f);
+            if (q > Q16_POST) q = Q16_POST;
+            if (q < -Q16_POST) q = -Q16_POST;
+            row[b] = (int16_t)q;
+        }
+    }
+}
+
+/* unsatisfied checks per lane (saturating int16).  exact = 0: the pass may stop once every lane
+ * of the live mask has one -- the counts are then only good for "zero or not". */
+__attribute__((target("avx2")))
+static inline void q16_syndrome(const int16_t *tot, int32_t nc, const int32_t *cptr, const int32_t *cidx,
+                                int32_t exact, __m256i live, int16_t *bc16)
+{
+    const __m256i zero = _mm256_setzero_si256();
+    __m256i badcnt = zero;
+    int32_t c = 0, e;
+    while (c < nc) {
+        int32_t stop = c + Q16_SYN_CHUNK;
+        if (stop > nc) stop = nc;
+        for (; c < stop; c++) {
+            __m256i par = zero;
+            for (e = cptr[c]; e < cptr[c + 1]; e++)
+                par = _mm256_xor_si256(par, _mm256_cmpgt_epi16(zero,
+                    _mm256_loadu_si256((const __m256i *)(tot + (size_t)cidx[e] * Q16_LANES))));
+            badcnt = _mm256_subs_epi16(badcnt, par);
+        }
+        if (!exact && _mm256_testz_si256(_mm256_cmpeq_epi16(badcnt, zero), live)) break;
+    }
+    _mm256_storeu_si256((__m256i *)bc16, badcnt);
+}
+
+/* one sweep over the checks.  packed = 0: messages in msg (nedges x 16).  packed = 1: in chk
+ * (nc x 48: m_others, m_first, first) and sg (one sign mask an edge).  fresh = 1: the messages
+ * are zero and are not read. */
+__attribute__((target("avx2,fma"), always_inline))
+static inline void q16_sweep(int16_t *tot, int16_t *msg, int16_t *chk, uint16_t *sg,
+                             int32_t nc, const int32_t *cptr, const int32_t *cidx,
+                             int32_t corr, float inv, float units, __m256i alpha_q15,
+                             const int packed, const int fresh)
+{
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i one16 = _mm256_set1_epi16(1);
+    const __m256i big = _mm256_set1_epi16((short)0x7FFF);
+    const __m256i msgmax = _mm256_set1_epi16(Q16_MSG);
+    const __m256i pmax = _mm256_set1_epi16(Q16_POST), pmin = _mm256_set1_epi16(-Q16_POST);
+    const __m256i bitsel = _mm256_setr_epi16(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048,
+                                             4096, 8192, 16384, (short)0x8000);
+    __m256i v[MAX_ROW_DEG];
+    int32_t c, e;
+    for (c = 0; c < nc; c++) {
+        const int32_t e0 = cptr[c], e1 = cptr[c + 1];
+        __m256i min1 = big, min2 = big, first = _mm256_set1_epi16(-1), par = zero;
+        __m256i mo = zero, mf = zero, fi = zero;
+        if (packed && !fresh) {
+            mo = _mm256_loadu_si256((const __m256i *)(chk + (size_t)c * 48));
+            mf = _mm256_loadu_si256((const __m256i *)(chk + (size_t)c * 48 + 16));
+            fi = _mm256_loadu_si256((const __m256i *)(chk + (size_t)c * 48 + 32));
+        }
+        for (e = e0; e < e1; e++) {
+            const __m256i jv = _mm256_set1_epi16((short)(e - e0));
+            const __m256i t = _mm256_loadu_si256((const __m256i *)(tot + (size_t)cidx[e] * Q16_LANES));
+            __m256i vv;
+            if (fresh) {
+                vv = t;
+            } else if (packed) {
+                const __m256i omag = _mm256_blendv_epi8(mo, mf, _mm256_cmpeq_epi16(fi, jv));
+                const __m256i s = _mm256_and_si256(_mm256_set1_epi16((short)sg[e]), bitsel);
+                const __m256i oneg = _mm256_cmpeq_epi16(s, bitsel);
+                vv = _mm256_subs_epi16(t, _mm256_sign_epi16(omag, _mm256_or_si256(oneg, one16)));
+            } else {
+                vv = _mm256_subs_epi16(t, _mm256_loadu_si256((const __m256i *)(msg + (size_t)e * Q16_LANES)));
+            }
+            v[e - e0] = vv;
+            par = _mm256_xor_si256(par, _mm256_cmpgt_epi16(zero, vv));
+            const __m256i mag = _mm256_abs_epi16(vv);
+            const __m256i lt1 = _mm256_cmpgt_epi16(min1, mag);
+            const __m256i lt2 = _mm256_cmpgt_epi16(min2, mag);
+            min2 = _mm256_blendv_epi8(_mm256_blendv_epi8(min2, mag, lt2), min1, lt1);
+            min1 = _mm256_blendv_epi8(min1, mag, lt1);
+            first = _mm256_blendv_epi8(first, jv, lt1);
+        }
+        __m256i others = min1;
+        if (corr) others = q16_boxplus(min1, min2, inv, units);
+        const __m256i m_others = _mm256_min_epu16(q16_scale(others, alpha_q15), msgmax);
+        const __m256i m_first = _mm256_min_epu16(q16_scale(min2, alpha_q15), msgmax);
+        if (packed) {
+            _mm256_storeu_si256((__m256i *)(chk + (size_t)c * 48), m_others);
+            _mm256_storeu_si256((__m256i *)(chk + (size_t)c * 48 + 16), m_first);
+            _mm256_storeu_si256((__m256i *)(chk + (size_t)c * 48 + 32), first);
+        }
+        for (e = e0; e < e1; e++) {
+            const __m256i vv = v[e - e0];
+            const __m256i isfirst = _mm256_cmpeq_epi16(first, _mm256_set1_epi16((short)(e - e0)));
+            const __m256i mag = _mm256_blendv_epi8(m_others, m_first, isfirst);
+            const __m256i neg = _mm256_xor_si256(par, _mm256_cmpgt_epi16(zero, vv));
+            const __m256i val = _mm256_sign_epi16(mag, _mm256_or_si256(neg, one16));
+            if (packed) {
+                /* lane b negative -> bit b: bytes 0-7 of each half, then the two halves side by side */
+                const uint32_t mm = (uint32_t)_mm256_movemask_epi8(_mm256_packs_epi16(neg, zero));
+                sg[e] = (uint16_t)(mm | (mm >> 8));
+            } else {
+                _mm256_storeu_si256((__m256i *)(msg + (size_t)e * Q16_LANES), val);
+            }
+            const __m256i nt = _mm256_min_epi16(_mm256_max_epi16(_mm256_adds_epi16(vv, val), pmin), pmax);
+            _mm256_storeu_si256((__m256i *)(tot + (size_t)cidx[e] * Q16_LANES), nt);
+        }
+    }
+}
+
+__attribute__((target("avx2,fma"), always_inline))
+static inline int32_t layered_q16_core(const float *llr, int32_t nblk, int32_t n,
+                                       int32_t nc, int32_t nedges,
+                                       const int32_t *cptr, const int32_t *cidx,
+                                       int32_t iters, float alpha, float scale, int32_t corr,
+                                       int32_t abort_k, int32_t abort_t, int32_t abort_stall,
+                                       uint8_t *bits, uint8_t *conv, int32_t *its,
+                                       int32_t *bad, int16_t *work, const int packed)
+{
+    int16_t *tot = work;                                   /* n x 16 */
+    int16_t *msg = work + (size_t)n * Q16_LANES;           /* dense: nedges x 16 */
+    int16_t *chk = msg;                                    /* packed: nc x 48 */
+    uint16_t *sg = (uint16_t *)(chk + (size_t)nc * 48);    /* packed: nedges */
+    int32_t aq = (int32_t)(alpha * 32768.0f + 0.5f);
+    if (aq < 1) aq = 1;
+    if (aq > 32767) aq = 32767;
+    const __m256i alpha_q15 = _mm256_set1_epi16((short)aq);
+    const float inv = 1.0f / scale, units = scale;
+    int32_t c, i, b;
+    (void)nedges;
+    for (c = 0; c < nc; c++)
+        if (cptr[c + 1] - cptr[c] > MAX_ROW_DEG) return -1;
+    if (nblk <= 0 || nblk > Q16_LANES) return -2;
+    q16_load(llr, nblk, n, scale, tot);
+    uint8_t done[Q16_LANES];
+    for (b = 0; b < Q16_LANES; b++) done[b] = b >= nblk;
+    int32_t last_bc[Q16_LANES], stall[Q16_LANES];
+    for (b = 0; b < Q16_LANES; b++) { last_bc[b] = 0x7fffffff; stall[b] = 0; }
+    for (b = 0; b < nblk; b++) { conv[b] = 0; its[b] = iters; bad[b] = -1; }
+    int32_t ndone = Q16_LANES - nblk;
+    for (int32_t it = 0; it <= iters; it++) {
+        /* the counts themselves are read by the abort rule, by the stall rule and by the bad output */
+        const int32_t exact = it == iters || abort_stall > 0 || (abort_k > 0 && it >= abort_k && abort_t > 0);
+        int16_t bc16[Q16_LANES], lv[Q16_LANES];
+        for (b = 0; b < Q16_LANES; b++) lv[b] = done[b] ? 0 : -1;
+        q16_syndrome(tot, nc, cptr, cidx, exact, _mm256_loadu_si256((const __m256i *)lv), bc16);
+        for (b = 0; b < nblk; b++) {
+            if (done[b]) continue;
+            const int32_t bcb = bc16[b];
+            int32_t give_up = 0;
+            if (abort_k > 0 && it >= abort_k && bcb != 0) {
+                if (abort_t > 0 && bcb >= abort_t) give_up = 1;
+                if (abort_stall > 0 && stall[b] >= abort_stall) give_up = 1;
+            }
+            if (bcb >= last_bc[b]) stall[b]++; else stall[b] = 0;
+            last_bc[b] = bcb;
+            if (bcb == 0 || it == iters || give_up) {
+                uint8_t *bout = bits + (size_t)b * n;
+                for (i = 0; i < n; i++) bout[i] = tot[(size_t)i * Q16_LANES + b] < 0;
+                if (bcb == 0) { conv[b] = 1; its[b] = it; bad[b] = 0; }
+                else          { its[b] = it; bad[b] = bcb; }
+                done[b] = 1;
+                ndone++;
+            }
+        }
+        if (ndone == Q16_LANES || it == iters) break;
+        if (it == 0)
+            q16_sweep(tot, msg, chk, sg, nc, cptr, cidx, corr, inv, units, alpha_q15, packed, 1);
+        else
+            q16_sweep(tot, msg, chk, sg, nc, cptr, cidx, corr, inv, units, alpha_q15, packed, 0);
+    }
+    return 0;
+}
+
+__attribute__((target("avx2,fma")))
+static int32_t layered_q16_avx2(const float *llr, int32_t nblk, int32_t n,
+                                int32_t nc, int32_t nedges,
+                                const int32_t *cptr, const int32_t *cidx,
+                                int32_t iters, float alpha, float scale, int32_t corr,
+                                int32_t abort_k, int32_t abort_t, int32_t abort_stall,
+                                uint8_t *bits, uint8_t *conv, int32_t *its,
+                                int32_t *bad, int16_t *work)
+{
+    return layered_q16_core(llr, nblk, n, nc, nedges, cptr, cidx, iters, alpha, scale, corr,
+                            abort_k, abort_t, abort_stall, bits, conv, its, bad, work, 0);
+}
+
+__attribute__((target("avx2,fma")))
+static int32_t layered_q16c_avx2(const float *llr, int32_t nblk, int32_t n,
+                                 int32_t nc, int32_t nedges,
+                                 const int32_t *cptr, const int32_t *cidx,
+                                 int32_t iters, float alpha, float scale, int32_t corr,
+                                 int32_t abort_k, int32_t abort_t, int32_t abort_stall,
+                                 uint8_t *bits, uint8_t *conv, int32_t *its,
+                                 int32_t *bad, int16_t *work)
+{
+    return layered_q16_core(llr, nblk, n, nc, nedges, cptr, cidx, iters, alpha, scale, corr,
+                            abort_k, abort_t, abort_stall, bits, conv, its, bad, work, 1);
+}
+#endif
+
 EXPORT int32_t ldpc_layered_q16(
     const float *llr, int32_t nblk, int32_t n, int32_t nc, int32_t nedges,
     const int32_t *cptr, const int32_t *cidx,
@@ -816,6 +1137,25 @@ EXPORT int32_t ldpc_layered_q16(
     if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
         return layered_q16_avx2(llr, nblk, n, nc, nedges, cptr, cidx, iters, alpha, scale, corr,
                                 abort_k, abort_t, abort_stall, bits, conv, its, bad, work);
+#endif
+    (void)llr; (void)nblk; (void)n; (void)nc; (void)nedges; (void)cptr; (void)cidx;
+    (void)iters; (void)alpha; (void)scale; (void)corr; (void)abort_k; (void)abort_t; (void)abort_stall;
+    (void)bits; (void)conv; (void)its; (void)bad; (void)work;
+    return -3;
+}
+
+EXPORT int32_t ldpc_layered_q16c(
+    const float *llr, int32_t nblk, int32_t n, int32_t nc, int32_t nedges,
+    const int32_t *cptr, const int32_t *cidx,
+    int32_t iters, float alpha, float scale, int32_t corr,
+    int32_t abort_k, int32_t abort_t, int32_t abort_stall,
+    uint8_t *bits, uint8_t *conv, int32_t *its, int32_t *bad,
+    int16_t *work)
+{
+#if defined(__x86_64__) || defined(_M_X64)
+    if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma"))
+        return layered_q16c_avx2(llr, nblk, n, nc, nedges, cptr, cidx, iters, alpha, scale, corr,
+                                 abort_k, abort_t, abort_stall, bits, conv, its, bad, work);
 #endif
     (void)llr; (void)nblk; (void)n; (void)nc; (void)nedges; (void)cptr; (void)cidx;
     (void)iters; (void)alpha; (void)scale; (void)corr; (void)abort_k; (void)abort_t; (void)abort_stall;

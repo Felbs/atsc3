@@ -91,11 +91,72 @@ def interleaving_sequence(nfft, l, n_data, direction="forward", toggle="i"):
                                         str(direction), str(toggle)).copy()
 
 
+@_functools.lru_cache(maxsize=8)
+def _rprime_words(nfft):
+    """R'_i for i = 0 .. nmax-1 as integers (bit j = R'_i[j]).
+
+    The LFSR that makes R' depends on the FFT size and on nothing else: not
+    on the symbol, the direction or the toggle.  One walk per FFT size.
+    """
+    nmax = S.FI_NMAX[nfft]
+    nr = int(np.log2(nmax))
+    taps = S.FI_R_TAPS[nfft]
+    out = np.zeros(nmax, np.int64)
+    v = 0                                         # R'_0 = R'_1 = 0
+    for i in range(nmax):
+        if i == 2:
+            v = 1                                 # R'_2 = [0...01]
+        elif i > 2:
+            fb = 0
+            for t in taps:
+                fb ^= (v >> t) & 1
+            v = (v >> 1) | (fb << (nr - 2))       # R'_i[nr-3:0] = R'_{i-1}[nr-2:1]
+        out[i] = v
+    return out
+
+
 def _interleaving_sequence_impl(nfft, l, n_data, direction="forward", toggle="i"):
     """H_l(p) for p = 0 .. n_data-1  (A/322 7.3).
 
     Returns an int array `H` where, for 8K/16K, A[p] = X[H[p]]: the cell that
     lands on the p-th available carrier is cell index H[p].
+
+    2026-11-10: array form of `_interleaving_sequence_ref` below, which walked
+    the LFSR in a Python loop for every symbol -- 48 ms a sequence on 8K, and
+    the GIL held throughout.  A live gpu-full chain met all 36 of a Frame's
+    sequences inside its FIRST decode (1.7 s; the prewarm built them on the
+    cpu_fast path only), the radio reader starved behind them, the SDR buffer
+    overflowed and the chain re-acquired: 2 s of every channel change.  Same
+    integers, same order, same dtype, same error -- gated element for element
+    against the loop over every FFT size, direction and toggle
+    (lab/gate_fi_sequence.py).
+    """
+    nmax = S.FI_NMAX[nfft]
+    nr = int(np.log2(nmax))
+    m = wire_map(nfft, l % 2, direction)
+    g = offset_word(nfft, l)
+    rp = _rprime_words(nfft)
+    r = np.zeros(nmax, np.int64)
+    for j in range(nr - 1):
+        r |= ((rp >> int(m[j])) & 1) << j
+    if toggle == "i":
+        tog = np.arange(nmax, dtype=np.int64) & 1
+    else:
+        tog = np.int64(l & 1)
+    h = ((tog << (nr - 1)) | r) ^ g
+    h = h[h < n_data]
+    if len(h) != n_data:
+        raise RuntimeError(f"FI produced {len(h)} valid addresses, expected {n_data}")
+    H = np.empty(n_data, int)
+    H[:] = h
+    return H
+
+
+def _interleaving_sequence_ref(nfft, l, n_data, direction="forward", toggle="i"):
+    """The loop the array form above replaced, kept as its referee.
+
+    This is the reading of A/322 7.3 the rest of the module argues for, one
+    step of the spec per line; nothing calls it but the gate.
     """
     nmax = S.FI_NMAX[nfft]
     nr = int(np.log2(nmax))

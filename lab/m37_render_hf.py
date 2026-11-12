@@ -160,8 +160,18 @@ def t_for(cfg):
     return _T_CACHE[key]
 
 
-def apply_hf_pair(pcmL, pcmR, groups, cfg):
+def apply_hf_pair(pcmL, pcmR, groups, cfg, state0=None, state_log=None):
     """Steps 2-5 for the L/R pair, JOINTLY.
+
+    Three things run on from one frame to the next: the noise-table index
+    and the two delta-coded envelopes (signal and noise, per channel).
+    `state_log` (a list) receives that state as it stands at the start of
+    every group, plus once more after the last; `state0` starts the call
+    from a logged state instead of from nothing.  A caller that renders a
+    stream in several calls passes the state back so the second call
+    continues the first; without it every call restarts the noise table at
+    0 and decodes its first TIME-coded envelopes against zeros (see
+    atsc3_audio.py for what that measured).
 
     The pair cannot be processed one channel at a time: when aspx_balance = 1
     -- 89.7 % of frames here -- channel B carries a PAN RATIO and its scale
@@ -187,9 +197,14 @@ def apply_hf_pair(pcmL, pcmR, groups, cfg):
     prev = {0: (None, 0), 1: (None, 0)}
     nprev = {0: None, 1: None}
     idx_noise = 0
+    if state0 is not None:
+        idx_noise, (prev[0], prev[1]), (nprev[0], nprev[1]) = state0
     slot = 0
     applied = 0
     for got in groups:
+        if state_log is not None:
+            state_log.append((idx_noise, (prev[0], prev[1]),
+                              (nprev[0], nprev[1])))
         if got is None or len(got) < 2:
             slot += 24
             continue
@@ -250,6 +265,9 @@ def apply_hf_pair(pcmL, pcmR, groups, cfg):
             idx_noise = (idx_noise + n_sb * span) % 512
         slot += 24
 
+    if state_log is not None:
+        state_log.append((idx_noise, (prev[0], prev[1]),
+                          (nprev[0], nprev[1])))
     for k in ("L", "R"):
         out[k] = Q.synthesise(Qh[k], w, Q.synthesis_matrix(255))
     return out, applied

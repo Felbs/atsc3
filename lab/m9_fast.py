@@ -381,6 +381,60 @@ class FrameDecoder:
             _sfft.fft(np.zeros((self.gx.nsym, self.gx.nfft), complex), axis=1, workers=2)
         except Exception:                                      # noqa: BLE001
             pass
+        if (self.backend == "gpu-full" and self.gb is None
+                and os.environ.get("ATSC3_NO_GPU_PREWARM") != "1"):
+            try:
+                self._prewarm_gpu()
+            except Exception as e:                             # noqa: BLE001
+                # a warm-up may never be the reason a decoder does not start:
+                # the first Frame builds whatever is missing, as it always did
+                self.gb = None
+                print(f"  gpu prewarm skipped ({e!r})", file=sys.stderr,
+                      flush=True)
+
+    def _prewarm_gpu(self):
+        """One synthetic Frame through the gpu-full path, before the clock.
+
+        Everything above builds tables; none of it touched the GPU, and the
+        first real Frame paid for the rest: the cell pool's own first use,
+        the GPU BICM tables (`_build_gpu_bicm`, 200 ms) and the first run of
+        every CUDA kernel in the BICM and the two LDPC decoders.  Measured on
+        live RF33 (11/10): the first decode_frame took 1835 ms, the second
+        (waiting on the first's lock) 809 ms, every later one 65-85 ms.
+
+        What is built here is what the first Frame would have built, from the
+        same inputs: the pool length, the Frame-constant `symbol_of` and the
+        constellation regions are geometry, not signal.  The window is seeded
+        noise, never air, and nothing it decodes is kept; the LDPC decoders
+        run ONE iteration (the kernels are the same at any count) and their
+        counters and the stage timers are put back.  ATSC3_NO_GPU_PREWARM=1
+        restores the old first Frame for an A/B.
+        """
+        rng = np.random.default_rng(0)
+        n = self.gx.frame_samples + 2 * 20 + 4096
+        y = 0.05 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        pool, info = self.cell_pool(y, 20, {})
+        key = len(pool)
+        with self._tm_lock:
+            if key not in self.regions:
+                self.regions[key] = C.constellation_regions(
+                    key, self.gx.plp0, self.gx.plp16)
+        _reg, dv = self.regions[key]
+        self._build_gpu_bicm(key, dv, info["symbol_of"])
+        with self._lock:
+            lam0, lam16, tail = self.gb.run(pool)
+            for g, lam in ((self.g16, lam16), (self.g0, lam0)):
+                if g is None:
+                    continue
+                kept = dict(g.stats)
+                bits = g.decode(lam, iters=1)[0]
+                g.stats.clear()
+                g.stats.update(kept)
+        C.dummy_check(np.concatenate(
+            [np.zeros(self.gx.dummy_start, complex), tail]))
+        self.baseband_batch(bits, self.ch0)
+        with self._tm_lock:
+            self.tm.clear()
 
     # -- front end ---------------------------------------------------------
     def _preamble_spare(self, y, t0):

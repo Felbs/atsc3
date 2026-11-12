@@ -189,7 +189,10 @@ def _decode_proc_main(shm_name, nslots, slot_len, in_q, out_q, cfg, idx=0):
             tm_all.update(sf1.tm)
         out_q.put(("done", tm_all))
         fd.close()
-        shm.close()
+        try:
+            shm.close()
+        except BufferError:        # a view is still alive; the parent unlinks
+            pass
     except Exception as e:                                     # noqa: BLE001
         try:
             out_q.put(("err", f"{type(e).__name__}: {e}\n{tb.format_exc()}"))
@@ -319,6 +322,21 @@ class Watch:
                 # decode pool warmed: pace from now, not from then
                 self.src.rebase()
             resume_radio = bool(pre) and hasattr(self.src, "pause")
+            if resume_radio and not os.environ.get("ATSC3_REPLAY_SNIFF"):
+                # A radio was paused after the sniff, so the sniffed air ends
+                # in a gap: at most two Frames of it decode, no MPU can be
+                # completed from them, and the front end spent 2.1 s on them
+                # (bootstrap search + demod, measured 11/10) while fresh air
+                # waited behind. They are dropped; the front end starts on
+                # the fresh stream, where no break needs announcing because
+                # it has seen nothing yet. ATSC3_REPLAY_SNIFF=1 restores the
+                # old order for an A/B. A replay source is untouched.
+                n_pre = sum(len(x) for x in pre if not isinstance(x, bytes))
+                ST.log(f"  sniffed air not replayed ({n_pre / self.rate:.2f} s"
+                       f", already stale) -- starting on the fresh stream")
+                pre = []
+                self.src.start()
+                resume_radio = False
             for x in pre:
                 if self.stop.is_set():
                     break
@@ -463,8 +481,13 @@ class Watch:
             p.join(timeout=8)
             if p.is_alive():
                 p.terminate()
+        # close() raises BufferError while a numpy view of the segment is
+        # alive; that must not skip the unlink, or the segment outlives us
         try:
             self.shm.close()
+        except Exception:                                      # noqa: BLE001
+            pass
+        try:
             self.shm.unlink()
         except Exception:                                      # noqa: BLE001
             pass
@@ -488,6 +511,13 @@ class Watch:
                 kind, payload = (self.d_out.get(timeout=0.5) if block
                                  else self.d_out.get_nowait())
             except queue.Empty:
+                # A worker killed from outside (OOM, a segfault in a kernel)
+                # posts nothing: its Frame never comes back, every later one
+                # parks behind it, and the output froze with no error at all.
+                dead = [p.exitcode for p in self.procs
+                        if p.exitcode not in (None, 0)]
+                if dead:
+                    raise RuntimeError(f"decode worker died (exit code {dead[0]})")
                 return False
             if kind == "err":
                 raise RuntimeError(f"decode worker: {payload}")
@@ -1477,7 +1507,13 @@ class LiveWriter:
                    f"media_s below over-counts by 2.667x.")
         ln["media"] += seg.get("dur", 0) / float(thz or 90000)
         now = time.time()
-        if now - self._last_meta >= 1.0:
+        # A lane's FIRST segment is written out at once. The lanes of one
+        # MPU arrive within milliseconds of each other, and with only the
+        # one-second rule the audio lane's write took the slot and the video
+        # lane stayed unlisted until the NEXT MPU, 2 s later -- the
+        # orchestrator, which starts the workers off this file, measured
+        # 2.6 s between the video lane existing and its being announced.
+        if ln["segments"] == 1 or now - self._last_meta >= 1.0:
             self._last_meta = now
             self._dump_meta(now)
 
@@ -1512,7 +1548,20 @@ class LiveWriter:
                     # diagnostic you can read only after stopping the run
                     # is a diagnostic you do not have.
                     stats=dict(self.stats) if self.stats else {}), fh)
-            os.replace(tmp, self.meta)
+            # On Windows the replace is REFUSED while a reader has the
+            # file open, and four processes poll it (the orchestrator
+            # every 0.1 s while it waits for the lanes). A refused write
+            # used to be dropped: when it was the one that announced the
+            # video lane, nothing wrote again until the next MPU, and the
+            # workers started 2.0 s late (measured 11/10, one start in
+            # three). A reader holds the file for well under a
+            # millisecond, so try again -- 40 ms at the very most.
+            for _try in range(20):
+                try:
+                    os.replace(tmp, self.meta)
+                    break
+                except PermissionError:
+                    time.sleep(0.002)
         except OSError:
             pass
 
@@ -1793,9 +1842,11 @@ def main(argv=None):
         # end their cores.  5 x 2 kept 239 of 243 Frames; 4 x 3 shed 16, 6 x 2
         # shed 65, 4 x 2 shed 106, and 16 threads a process thrashes outright.
         # Only the values the user did not set are touched.
-        if "--decode-procs" not in sys.argv:
+        def given(opt):            # "--opt N" and "--opt=N" both count as set
+            return any(x == opt or x.startswith(opt + "=") for x in sys.argv)
+        if not given("--decode-procs"):
             a.decode_procs = max(2, ncpu // 2 - 1)
-        if "--threads" not in sys.argv:
+        if not given("--threads"):
             a.threads = 2
     if a.fe_threads is None:
         a.fe_threads = 16 if ncpu >= 8 else max(1, ncpu)
