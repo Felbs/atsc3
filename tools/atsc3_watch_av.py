@@ -125,10 +125,11 @@ def _job_assign(job, proc):
         return False
 
 
-def discover_lanes(live, timeout, min_video_bytes=400_000):
+def discover_lanes(live, timeout, min_video_bytes=1):
     """Wait for the chain's live.json to list a video lane with bytes on disk;
     -> (video_path, [(pid, element), ...] audio lanes by pid) or None."""
     t0 = time.time()
+    t_vid = None
     while time.time() - t0 < timeout:
         try:
             import json
@@ -142,6 +143,16 @@ def discover_lanes(live, timeout, min_video_bytes=400_000):
                 vid = sorted(vids, key=lambda l: l.get("pid", 1 << 30))[0]
                 auds = sorted((l for l in lanes.values() if l.get("kind") == "audio"),
                               key=lambda l: l.get("pid", 1 << 30))
+                # The video lane is now announced with its first segment,
+                # and the audio lanes of the same MPU can land a few Frames
+                # after it. Two audio lanes = the usual programme, go at
+                # once; otherwise give the rest one second to appear, so a
+                # late lane is not mistaken for a missing language.
+                if t_vid is None:
+                    t_vid = time.time()
+                if len(auds) < 2 and time.time() - t_vid < 1.0:
+                    time.sleep(0.1)
+                    continue
                 elements = ["5_X", "pair"]
                 # 13.26: (pid, element, lang) -- lang from live.json (the
                 # chain reads it off the mdhd / the SLS), None when unsaid
@@ -150,7 +161,7 @@ def discover_lanes(live, timeout, min_video_bytes=400_000):
                 return vid["path"], aud
         except Exception:                                      # noqa: BLE001
             pass
-        time.sleep(0.5)
+        time.sleep(0.1)
     return None
 
 
@@ -160,7 +171,8 @@ def log(m):
 
 def find_python(explicit=None):
     cands = [explicit] if explicit else []
-    cands += [os.path.expanduser(r"~\radioconda\python.exe"),
+    cands += [sys.executable,      # the interpreter running this may be the one that has it
+              os.path.expanduser(r"~\radioconda\python.exe"),
               os.path.expanduser("~/radioconda/python.exe"),
               os.path.expanduser("~/radioconda/bin/python")]
     for c in cands:
@@ -182,7 +194,7 @@ def wait_for(path, min_bytes, timeout):
                 return True
         except OSError:
             pass
-        time.sleep(0.3)
+        time.sleep(0.1)
     return False
 
 
@@ -209,16 +221,28 @@ def teardown(procs):
                 kids = psutil.Process(p.pid).children(recursive=True)
             except Exception:                                  # noqa: BLE001
                 pass
-            for k in kids:
-                try:
-                    k.terminate()
-                except Exception:                              # noqa: BLE001
-                    pass
+            # SIGTERM to the worker itself and TIME to act on it: the
+            # supervisor (atsc3_run.py) stops its chain tree in its own
+            # `finally`, and the chain closes the radio on SIGTERM.  The
+            # children used to be terminated first and killed milliseconds
+            # later -- an abrupt stop of a streaming SDR.  Only what is
+            # still alive after the wait is terminated, then killed.
             p.terminate()
             try:
-                p.wait(timeout=5)
+                p.wait(timeout=20)
             except Exception:                                  # noqa: BLE001
                 p.kill()
+            for k in kids:
+                try:
+                    if k.is_running():
+                        k.terminate()
+                except Exception:                              # noqa: BLE001
+                    pass
+            try:
+                import psutil
+                psutil.wait_procs(kids, timeout=5)
+            except Exception:                                  # noqa: BLE001
+                pass
             for k in kids:
                 try:
                     if k.is_running():
@@ -258,6 +282,9 @@ def main():
     ap.add_argument("--live-dir", default=None)
     ap.add_argument("--tv-extra", default="",
                     help="extra args appended to the atsc3_tv viewer command")
+    ap.add_argument("--audio-extra", default="",
+                    help="extra arguments for both audio workers "
+                         "(atsc3_audio.py), e.g. \"--interval 2\"")
     ap.add_argument("--chain-extra", default="",
                     help="extra args appended to the chain's watch command "
                          "(e.g. \"--decode-procs 2 --threads 2\") -- the "
@@ -278,7 +305,7 @@ def main():
     # "wrong audio for the first minute" symptom). Remove this session's known
     # live artifacts by glob so every worker tails from byte 0 and shares one
     # origin. Targeted globs only -- never rm -rf a dir that may hold captures.
-    for pat in ("live_video_*", "live_audio*", "live_subs_*", "live.json",
+    for pat in ("live_video_*", "live_audio*", "live_subs_*", "live_subs.json", "live.json",
                 "live.srt", "*.state.json", "*.idx"):
         for f in glob.glob(os.path.join(live, pat)):
             try:
@@ -294,7 +321,7 @@ def main():
     job = _windows_job()
     job_warned = [False]
 
-    def spawn(cmd, quiet=True):
+    def spawn(cmd, quiet=True, stdin=None):
         # 13.27: a quiet child used to go to DEVNULL.  The 60-minute Antenna B
         # soak restarted the chain four times and lost a caption worker, and
         # the supervisor's four verdicts and the worker's traceback were
@@ -310,7 +337,7 @@ def main():
             except OSError:
                 out = subprocess.DEVNULL
         p = subprocess.Popen(
-            cmd, cwd=ROOT,
+            cmd, cwd=ROOT, stdin=stdin,
             stdout=out if quiet else None,
             stderr=subprocess.STDOUT if quiet else None)
         p._av_cmd = list(cmd)          # E111: so the supervisor can respawn
@@ -354,11 +381,67 @@ def main():
                        "--ant", a.ant, "--secs", "0", "--live-dir", live,
                        "--extra", ("--assets all " + extra).strip()])
         log(f"chain up (pid {chain.pid}) -- RF{a.rf} on {a.ant}")
+        # Audio workers in STANDBY: started now, with the decoder loaded,
+        # and handed their lane when the chain has one. Started at the lane
+        # they took 2.0 s to produce a usable wav (1.4 s of it start-up),
+        # and the muxer waits for that wav -- measured 11/10. One per
+        # programme this machine will decode, in the order they are handed
+        # out below (the main programme's worker shares this console, the
+        # second logs to atsc3_audio.log, as before); a worker that is never
+        # needed is told so and exits.
+        standby = []
+        n_standby = 2 if (a.both_langs if a.both_langs is not None
+                          else (os.cpu_count() or 1) >= 8) else 1
+        for i_sb in range(n_standby):
+            try:
+                standby.append(spawn([py, "tools/atsc3_audio.py", "--standby"],
+                                     quiet=i_sb > 0, stdin=subprocess.PIPE))
+            except OSError:
+                break
+
+        def drop(p):
+            """A standby worker that will not be used: gone, and not respawned."""
+            if p in procs:
+                procs.remove(p)
+            try:
+                p.stdin.close()       # end of input = "not needed"
+            except OSError:
+                pass
+            try:
+                p.wait(timeout=5)
+            except Exception:                                  # noqa: BLE001
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+
+        def audio_worker(argv, quiet):
+            """A standby worker handed `argv`, or a fresh one if none is left."""
+            import json
+            cmd = [py, "tools/atsc3_audio.py"] + list(argv)
+            while standby:
+                p = standby.pop(0)
+                if p.poll() is None:
+                    try:
+                        p.stdin.write((json.dumps(list(argv))
+                                       + chr(10)).encode())
+                        p.stdin.close()
+                        p._av_cmd = cmd   # a respawn starts it the usual way
+                        return p
+                    except OSError:
+                        pass
+                drop(p)
+            return spawn(cmd, quiet=quiet)
+
+        def dismiss_standby():
+            while standby:
+                drop(standby.pop(0))
         # 13.25: learn the lanes from the chain before spawning anything that
         # needs a PID.  The LDM pool warms for ~25 s before the first Frame.
         log("waiting for the chain's video lane (live.json) ...")
         found = discover_lanes(live, 150)
         if found is None:
+            dismiss_standby()
             log("FATAL: no video lane within 150 s -- carrier receivable?")
             return 1
         video, audio_lanes = found
@@ -407,26 +490,30 @@ def main():
         # rolls at 14:42 and 15:43, audio ~65 min stale, viewer frozen in
         # a re-anchor loop). At first launch the lane is seconds old, so
         # the flag is a no-op; on a resume (state intact) it is ignored.
-        audio = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
-                       "--pid", str(pid_e), "--element", el_e,
-                       "--channels", "2" if a.stereo else "6",
-                       "--start-behind", "60",
-                       "--out", os.path.join(live, "live_audio.wav")],
-                      quiet=False)
+        audio = audio_worker(["--live-dir", live,
+                              "--pid", str(pid_e), "--element", el_e,
+                              "--channels", "2" if a.stereo else "6",
+                              "--start-behind", "60",
+                              "--out", os.path.join(live, "live_audio.wav")]
+                             + a.audio_extra.split(),
+                             quiet=False)
         log(f"audio worker up (pid {audio.pid}) -- {a.lang} pid {pid_e} "
             f"{'stereo' if a.stereo else '5.1'}")
         if both:
-            audio2 = spawn([py, "tools/atsc3_audio.py", "--live-dir", live,
-                            "--pid", str(pid_s), "--element", el_s,
-                            "--channels", "2",
-                            "--start-behind", "60",
-                            "--out", os.path.join(live,
-                                                  "live_audio_spa.wav")])
+            audio2 = audio_worker(["--live-dir", live,
+                                   "--pid", str(pid_s), "--element", el_s,
+                                   "--channels", "2",
+                                   "--start-behind", "60",
+                                   "--out", os.path.join(live,
+                                                         "live_audio_spa.wav")]
+                                  + a.audio_extra.split(),
+                                  quiet=True)
             log(f"audio worker up (pid {audio2.pid}) -- {other} pid {pid_s} "
                 f"stereo")
         else:
             log(f"second programme ({other}) NOT decoded -- {ncpu} cores; "
                 f"--both-langs forces it (E110)")
+        dismiss_standby()
 
         # 3. caption worker (optional)
         if a.cc:

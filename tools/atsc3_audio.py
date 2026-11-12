@@ -181,6 +181,62 @@ def lane_shortfall(path, per_mpu=60):
     return nfrag, short
 
 
+HF_DELAY = 577      # samples the A-SPX path delays a channel against its core
+#                     (measured 11/10: 602 at 48 kHz, correlation 0.997)
+HF_TAIL = 2         # frames after a burst frame that also play core-band
+
+
+def core_for_bursts(hf_a, hf_b, core_a, core_b, lead, limit, owed):
+    """One pair's HF-rendered pass, with the core put back wherever A-SPX
+    has run away. -> (a, b, frames replaced, frames still owed).
+
+    Measured 11/10 on air: the Ls/Rs pair, digitally silent before and
+    after, came out at 5.6e7 for three frames -- 60 times the loudest
+    programme sample ever seen. With A-SPX off the same frames peak at 366;
+    their envelope indices read 54 where the frames either side read 6, the
+    signal gain sits on its 1.58e5 cap. That is a decode error in the
+    envelope chain (balance 1 -> 0 at that frame; NOT yet found), and no
+    programme. A frame whose peak is above `limit` is therefore replaced by
+    its core, delayed as the A-SPX path delays it, together with the
+    HF_TAIL frames after it (the filter bank is causal, its memory reaches
+    forward only; with one frame the next still peaked at 2.2e4 on a
+    channel that idles at 100). `owed` is how many of those frames the
+    previous pass left for this one, so the result does not depend on
+    where a pass ends. Both channels go together: the pair is rendered
+    jointly.
+    """
+    n = min(len(hf_a), len(hf_b)) // 1536
+    if not n:
+        return hf_a, hf_b, 0, owed
+    pk = np.maximum(np.abs(hf_a[:n * 1536]).reshape(n, 1536).max(axis=1),
+                    np.abs(hf_b[:n * 1536]).reshape(n, 1536).max(axis=1))
+    hot = pk > limit
+    bad = np.zeros(n, dtype=bool)
+    left = int(owed)
+    for f in range(n):
+        if hot[f]:
+            bad[f], left = True, HF_TAIL
+        elif left:
+            bad[f], left = True, left - 1
+    if not bad.any():
+        return hf_a, hf_b, 0, 0
+    out = []
+    for hf, core in ((hf_a, core_a), (hf_b, core_b)):
+        d = np.concatenate([np.zeros(HF_DELAY), core])[lead:lead + len(hf)]
+        hf = np.array(hf, dtype=float)
+        for f in np.flatnonzero(bad):
+            hf[f * 1536:(f + 1) * 1536] = d[f * 1536:(f + 1) * 1536]
+        out.append(hf)
+    return out[0], out[1], int(bad.sum()), left
+
+
+def _size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return -1
+
+
 class LaneReader:
     """Incremental reader for an append-only fMP4 lane.
 
@@ -425,6 +481,12 @@ def main():
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--interval", type=float, default=8.0,
                     help="seconds between catch-up passes")
+    ap.add_argument("--follow", action="store_true",
+                    help="start a pass as soon as the lane has grown instead "
+                         "of every --interval seconds (which stays as the "
+                         "longest wait). For a low-latency viewer: the "
+                         "decoded sound is then a pass behind the lane, not "
+                         "up to an interval plus a pass")
     ap.add_argument("--wait", type=float, default=90.0)
     ap.add_argument("--element", choices=("5_X", "pair"), default="5_X",
                     help="AC-4 element type: 5_X for the 5.1 main (pid13), "
@@ -445,7 +507,39 @@ def main():
                     help="2 = stereo pair, keeps up live (1.27x); 6 = full "
                          "5.1, measured 0.62x even threaded -- recordings "
                          "only until the filterbank is faster")
+    ap.add_argument("--max-pass", type=int, default=1800,
+                    help="most AC-4 frames decoded in one pass (1800 = 60 s; "
+                         "bounds memory after a stall). With --once, a small "
+                         "value replays a lane the way a live worker with a "
+                         "short --interval sees it -- the multi-pass gate")
+    ap.add_argument("--ref-peak", type=float, default=0.0,
+                    help="decoder-scale level that is written at 0.9 of full "
+                         "scale; 0 = the default for the element (see "
+                         "REF_PEAK in the code)")
+    ap.add_argument("--standby", action="store_true",
+                    help="start, load the decoder, then wait for the real "
+                         "argument list as one JSON line on stdin (an empty "
+                         "line or end of input = not needed, exit 0). The "
+                         "orchestrator starts its workers this way while the "
+                         "chain is still tuning")
     a = ap.parse_args()
+    if a.standby:
+        # A worker started when its lane appears spends 1.4 s getting ready
+        # (the interpreter, numpy, and scipy.signal alone is 0.94 s) while
+        # the first two seconds of sound sit in the lane -- measured 11/10,
+        # 2.0 s from the lane to a usable wav, on every channel change. In
+        # standby that is paid while the chain tunes, which takes 12 s
+        # anyway. What a worker decodes cannot be known until the chain has
+        # read the multiplex, so the arguments come afterwards.
+        import m17_ac4_walk                                     # noqa: F401
+        import m37_render_hf                                    # noqa: F401
+        import m38_resample                                     # noqa: F401
+        import m30_filterbank                                   # noqa: F401
+        import m42_ac4_stream                                   # noqa: F401
+        line = sys.stdin.readline()
+        if not line.strip():
+            return 0
+        a = ap.parse_args([str(x) for x in json.loads(line)])
     d = a.live_dir or os.path.join(ROOT, "data", "atsc3_live")
 
     t0 = time.time()
@@ -454,7 +548,7 @@ def main():
         lane = pick_audio(lanes(d), a.pid, a.kind)
         if lane and os.path.exists(lane["path"]):
             break
-        time.sleep(2.0)
+        time.sleep(0.2)
     if not lane:
         print(f"no audio lane in {d} -- is the chain running with "
               f"--assets av|all ?", file=sys.stderr)
@@ -489,6 +583,7 @@ def main():
     except OSError:
         pass
     resume_n = 0
+    ref_resume = 0.0
     try:
         stv = json.load(open(state_p))
         _ch_ok = False
@@ -498,7 +593,10 @@ def main():
                 _ch_ok = _w.open(out).getnchannels() == a.channels
             except Exception:                                  # noqa: BLE001
                 _ch_ok = False
+        # same path AND same generation: after a chain restart the lane has
+        # the same name and different content, and the old cursor is not in it
         if (_ch_ok and stv.get("lane") == os.path.abspath(src)
+                and stv.get("generation") in (None, lane.get("generation", 0))
                 and os.path.getsize(out) >= 44 + stv["wav_samples"] * 2 * a.channels):
             resume_n = stv["wav_samples"]
             cursor0, pad0 = stv["cursor"], stv["pad_done"]
@@ -513,6 +611,7 @@ def main():
             # resumed. Recomputing it from the resumed cursor put it 3 slots
             # (6 s) late, which would have offset the whole muxed programme.
             resume_first = stv.get("first_seq")
+            ref_resume = float(stv.get("ref_peak") or 0.0)
             print(f"  resuming: {resume_n/OUT_FS:.1f} s already written, "
                   f"lane frame {stv['cursor']} (re-running {resume_skip} "
                   f"frames to settle state)")
@@ -545,12 +644,66 @@ def main():
     wav = WavAppender(out, ch=a.channels, resume=resume_n)
     dec = Ac4Stream(element=a.element)
     LEAD = 4                        # frames of QMF lead-in, discarded
-    MAX_PASS = 1800                 # 60 s of audio; caps peak RSS
+    MAX_PASS = max(8, a.max_pass)   # 60 s of audio; caps peak RSS
+    # ONE LEVEL FOR THE WHOLE STREAM.
+    #
+    # Until 11/10 every pass was scaled so that ITS OWN loudest sample sat at
+    # 0.9. A pass with a loud moment in it was therefore turned down and a
+    # quiet one turned up: the level stepped at every pass boundary. Measured
+    # against a one-pass decode of the same lane: 5-10 % steps with 8 s
+    # passes, several dB with 2 s passes -- the sound "going quieter then
+    # louder" that E116 put down to failed HF passes (hf_fail was 0).
+    #
+    # The decoder's own scale is fixed, so the gain is now a constant:
+    # 0.9 / ref_peak. ref_peak starts at REF_PEAK and only ever goes UP, when
+    # a pass is louder than anything before it, so nothing clips. It is
+    # logged when it moves and kept in the state file, so a resumed worker
+    # does not start louder than it stopped.
+    #
+    # REF_PEAK is set a little ABOVE the loudest sample seen in ~9 minutes of
+    # this market's air (11/10: 5.1 element 8.23e5, stereo pair 1.69e5), so
+    # that an ordinary programme never moves it. The first values (7.5e5 and
+    # 1.8e5) were passed on air within 20 s: the gain dropped 0.8 dB at a
+    # moment that depended on when the worker started, which is the very
+    # run-to-run difference this is here to remove. The cost against the
+    # per-pass scaling is a quieter track: about 3 dB on the 5.1, 2 dB on
+    # the stereo. The decoder's true full scale is not established.
+    #
+    # OPEN: the stereo element sits 12 dB under the 5.1 on the same scale.
+    # Whether that is the broadcast or a scale difference in the pair path is
+    # not established; two defaults keep both tracks where they were.
+    #
+    # The reference follows the PROGRAMME, never a decode error. On air,
+    # 11/10, three frames of the Ls/Rs pair came out 60 times louder than
+    # anything before (see core_for_bursts): the reference followed them,
+    # and the whole track played 36 dB down from that moment to the end of
+    # the run. So it now moves only as far as BURST, twice the starting
+    # value (6 dB: more than that above the loudest sample of 9 minutes is
+    # not a programme); A-SPX frames above BURST play core-band; and
+    # anything still above it is clipped where it stands and reported.
+    REF_PEAK = {"pair": 2.0e5}.get(a.element, 9.0e5)
+    REF_PEAK = a.ref_peak or REF_PEAK
+    BURST = 2.0 * REF_PEAK
+    ref_peak = min(max(REF_PEAK, ref_resume), BURST)
+    hf_hot = {"lr": 0, "sr": 0}
+    n_burst = 0
+    # one resampler for the life of the worker: no seam at pass boundaries
+    rs_stream = RS.StreamResampler()
     fb_state = {k: None for k in chans}
     # per-PAIR lead buffers: the two A-SPX pairs carry independent envelope
     # state and cannot share a lead-in
     lead_pcm = {k: np.zeros(0) for k in ("L", "R", "Ls", "Rs")}
     lead_groups = {"lr": [], "sr": []}
+    # A-SPX state per pair (noise-table index + the delta-coded signal and
+    # noise envelopes): as it stood at the START of each of the last LEAD
+    # frames, then after the last frame. apply_hf_pair used to start every
+    # call from nothing, so each pass (a) restarted the noise table at 0 --
+    # the noise a frame got depended on where the pass happened to begin --
+    # and (b) decoded TIME-coded envelopes against zeros until the next
+    # FREQ-coded one, up to 9 frames (0.3 s) into the pass. Measured on a
+    # 5.1 lane, 2 s passes against one pass: the 6-24 kHz band of L/R/Ls/Rs
+    # was only -7..-12 dB alike. None = the start of a lane.
+    hf_state = {"lr": [None], "sr": [None]}
     self_hf_fail = 0
     consumed_resume = not (cursor0 or skip0)
     pad_done = pad0
@@ -563,6 +716,8 @@ def main():
     try:
         while True:
             t_pass = time.time()
+            size_read = _size(src)      # before the read, so nothing that
+            #                             lands during the pass is missed
             try:
                 # IDENTITY-BASED roll detection, ahead of the byte-level
                 # proxy: the writer publishes `generation` in live.json, and
@@ -627,6 +782,7 @@ def main():
                 fb_state = {k: None for k in chans}
                 lead_pcm = {k: np.zeros(0) for k in ("L", "R", "Ls", "Rs")}
                 lead_groups = {"lr": [], "sr": []}
+                hf_state = {"lr": [None], "sr": [None]}
                 # `first_slot`, not `first_seq` -- the state FILE calls it
                 # first_seq but the loop variable is first_slot, and resetting
                 # the wrong name would silently leave the old lane's anchor in
@@ -722,12 +878,27 @@ def main():
                             pb = np.concatenate([lead_pcm[kb][-lead:],
                                                  pcm[kb]])
                             gg = lead_groups[gkey][-LEAD:] + gl
+                            n_lead = len(gg) - len(gl)
+                            hs, slog = hf_state[gkey], []
                             try:
-                                hf, _n = R37.apply_hf_pair(pa, pb, gg,
-                                                           dec.cfg)
-                                pcm[ka] = hf["L"][lead:]
-                                pcm[kb] = hf["R"][lead:]
+                                hf, _n = R37.apply_hf_pair(
+                                    pa, pb, gg, dec.cfg,
+                                    state0=hs[max(0, len(hs) - 1 - n_lead)],
+                                    state_log=slog)
+                                pcm[ka], pcm[kb], nb_, hf_hot[gkey] = \
+                                    core_for_bursts(
+                                        hf["L"][lead:], hf["R"][lead:],
+                                        pa, pb, lead, BURST, hf_hot[gkey])
+                                if nb_:
+                                    n_burst += nb_
+                                    print(f"  ! A-SPX burst on {ka}/{kb}: "
+                                          f"{nb_} frame(s) above "
+                                          f"{BURST:.3g} play CORE-BAND "
+                                          f"({n_burst} so far)", flush=True)
+                                hf_state[gkey] = slog[-(LEAD + 1):]
                             except Exception as _hfe:          # noqa: BLE001
+                                hf_state[gkey] = (
+                                    hs + [hs[-1]] * len(gl))[-(LEAD + 1):]
                                 self_hf_fail += 1
                                 if self_hf_fail <= 5 or                                         self_hf_fail % 50 == 0:
                                     print(f"  ! HF pass failed "
@@ -740,6 +911,9 @@ def main():
                         else:
                             lead_pcm[ka] = pcm[ka][-LEAD * 1536:]
                             lead_pcm[kb] = pcm[kb][-LEAD * 1536:]
+                            hf_state[gkey] = (
+                                hf_state[gkey] + [hf_state[gkey][-1]]
+                                * len(gl))[-(LEAD + 1):]
                         lead_groups[gkey] = (lead_groups[gkey] + gl)[-LEAD:]
                 y = np.column_stack([pcm[k] for k in chans])
                 rs0 = resume_skip
@@ -773,7 +947,22 @@ def main():
                     y = np.vstack(parts)
                 n_wav0 = wav.n          # wav offset where THIS batch begins
                 if len(y):
-                    y = RS.resample(y / max(np.abs(y).max(), 1e-9) * 0.9)
+                    pk = float(np.abs(y).max())
+                    if pk > BURST:
+                        n_over = int((np.abs(y) > BURST).any(axis=1).sum())
+                        print(f"  ! level: {n_over} samples up to {pk:.4g}, "
+                              f"above anything a programme reaches "
+                              f"({BURST:.3g}) -- clipped, the reference "
+                              f"stays at {ref_peak:.4g}", flush=True)
+                        y = np.clip(y, -ref_peak, ref_peak)
+                        pk = float(np.abs(y).max())
+                    if pk > ref_peak:
+                        print(f"  level: peak {pk:.4g} is above the "
+                              f"reference {ref_peak:.4g} -- gain lowered "
+                              f"{20 * np.log10(pk / ref_peak):.1f} dB from "
+                              f"here on", flush=True)
+                        ref_peak = pk
+                    y = rs_stream.push(y * (0.9 / ref_peak))
                     wav.append(y)
                     total_media += len(y) / OUT_FS
                 # Record WHICH MPU SLOT sample 0 of this wav belongs to.
@@ -805,7 +994,8 @@ def main():
             try:
                 json.dump(dict(lane=os.path.abspath(src), cursor=cursor,
                                pad_done=pad_done, wav_samples=wav.n,
-                               first_seq=first_slot, generation=gen_seen),
+                               first_seq=first_slot, generation=gen_seen,
+                               ref_peak=ref_peak),
                           open(state_p, "w"))
             except OSError:
                 pass
@@ -818,7 +1008,7 @@ def main():
             print(f"  {cursor} fr ({dec.n_bad} bad), "
                   f"{total_media:.1f} s of audio, "
                   f"pad {n_padded}, behind {behind}, "
-                  f"hf_fail {self_hf_fail}, "
+                  f"hf_fail {self_hf_fail}, burst {n_burst}, "
                   f"pass {dt_:.1f} s"
                   + (f", {total_media/total_wall:.2f}x real time"
                      if total_wall > 0 else ""))
@@ -838,7 +1028,24 @@ def main():
                 return ROLL_EXIT_RC
             if a.once and not behind:
                 break
-            time.sleep(max(0.5, a.interval - dt_))
+            if a.follow and not a.once:
+                # A pass on a clock is a pass at a random moment of the 2 s
+                # an MPU takes to arrive: the sound for a slot was ready
+                # anywhere from one pass (0.6 s) to an interval plus a pass
+                # (2.6 s at --interval 2) after the slot landed, and which,
+                # depended on when the worker happened to start. Measured
+                # 11/10 with a muxer at --lag 0: one run held every chunk a
+                # whole slot, the next put the first chunk out and the second
+                # 4.3 s later. The lane is appended a whole fragment at a
+                # time, so its size is the event to wait for; a fragment
+                # caught half-written changes the size again when it is
+                # complete.
+                t_end = t_pass + max(0.5, a.interval)
+                while (not behind and time.time() < t_end
+                       and _size(src) == size_read):
+                    time.sleep(0.05)
+            elif not a.once:
+                time.sleep(max(0.5, a.interval - dt_))
     except KeyboardInterrupt:
         print("  stopped")
     finally:

@@ -81,6 +81,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 MPU_SECONDS = 2.002
+CLOCK_ORIGIN = 0.1                # seconds; see where t_clock is set
 SPF = 96096                       # audio samples per fragment at 48 kHz
 IS_WIN = (os.name == "nt")
 VLC_DEFAULT = r"C:\Program Files\VideoLAN\VLC\vlc.exe"   # Windows fallback
@@ -1556,6 +1557,35 @@ class TsStitch:
         return a.tobytes() + ts[n * 188:]
 
 
+class StitchedFile:
+    """A file sink whose chunks go through TsStitch, like the player pipe's.
+
+    The file sink was written chunk by chunk as ffmpeg made each one, every
+    PID's continuity counter restarting at each slot (measured 2026-11-11 in
+    what tvTuna serves: 16-18 restarts per PID in 36 s, ffmpeg's demuxer
+    flagging each slot's keyframe "Packet corrupt", and a player that drops
+    flagged packets losing 13 pictures of 1799).  A partial packet at the end
+    of a write is held for the next one, so the counters stay on packets."""
+    def __init__(self, f):
+        self.f, self.stitch, self.rem = f, TsStitch(), b""
+
+    def write(self, data):
+        data = self.rem + data
+        n = len(data) // 188 * 188
+        self.rem = data[n:]
+        if n:
+            self.f.write(self.stitch(data[:n]))
+
+    def flush(self):
+        self.f.flush()
+
+    def close(self):
+        if self.rem:
+            self.f.write(self.rem)
+            self.rem = b""
+        self.f.close()
+
+
 class PipeFeed:
     """Feed a player's stdin WITHOUT ever blocking the muxer.
 
@@ -1861,7 +1891,7 @@ def main():
             f"muxing begins")
     else:
         out_ts = a.out or os.path.join(tmp, "live_tv2.ts")
-        sink = open(out_ts, "wb")
+        sink = StitchedFile(open(out_ts, "wb"))
         log(f"v2 sink: {out_ts}" + ("" if a.player == "none"
                                     else " (VLC follows first chunk)"))
     tel = Telemetry(os.path.join(tmp, "telemetry.jsonl"),
@@ -1899,7 +1929,16 @@ def main():
             log(f"  VLC control interface on 127.0.0.1:{vlc_http[0]}")
         return p
 
-    t_clock = 0.0                 # the shared output clock, only ever grows
+    # The output clock starts a little AFTER zero. Both audio encoders put
+    # their priming frame before the first sample (mp2 481 samples, AC-3
+    # 256), so a chunk at t_off 0 has packets at -10.02 ms and -5.33 ms; a
+    # TS cannot carry a negative time, and ffmpeg moved the WHOLE first chunk
+    # 10.02 ms later to make room. Every later chunk was where it should be,
+    # so the first chunk overlapped the second by 10 ms in all four streams
+    # (one "non monotonically increasing dts" in every decode, measured
+    # 11/10: first video dts 0.010022, second chunk's 2.002000). Nothing
+    # depends on the clock starting at exactly zero.
+    t_clock = CLOCK_ORIGIN        # the shared output clock, only ever grows
     sess = Session(d, t_clock)
     sess.stereo_only = a.stereo
     if a.mode == "v2":
@@ -1949,7 +1988,7 @@ def main():
                     except Exception:                      # noqa: BLE001
                         pass
                     pl = spawn_v2_ffplay()
-                    record_player(tmp, pl, player_image("ffplay"))
+                    record_player(tmp, pl, player_image(a.player))
                     feed.attach(pl.stdin)
                     feed_respawns.append(now)
             if pl is not None and pl.poll() is not None:
@@ -2108,7 +2147,11 @@ def main():
                 sess.vid = ns.vid or sess.vid
                 sess.lanes = ns.lanes
                 sess.eng, sess.spa = ns.eng, ns.spa
-                if ns.anchor_exact and not sess.anchor_exact:
+                # a caption worker respawned after a chain restart computes
+                # a NEW anchor; keeping the first one shifted every cue by
+                # the gap between the two and no caption showed again
+                if ns.anchor_exact and (not sess.anchor_exact
+                                        or ns.anchor_seq != sess.anchor_seq):
                     sess.anchor_seq = ns.anchor_seq
                     sess.anchor_exact = True
             idx = sess.v_idx()

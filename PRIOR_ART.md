@@ -3231,3 +3231,304 @@ yet (the running supervisor predates it); tonight's soak runs it.
 broken in the telemetry -- the telemetry got richer (the per-Frame PLP 1 line, the supervisor's and
 the caption worker's logs).  The overnight soak (Antenna A, 20:30-06:30) runs the same code plus
 the lane rule.
+
+### 13.32 Channel pick to first picture: 42.9 s down to 13-15 s, and what the timing turned up (2026-11-10)
+
+Measured the way tvTuna serves a channel: the orchestrator (`tools/atsc3_watch_av.py`) started
+with tvTuna's own command, the sink a file, the clock stopped when the sink passes tvTuna's "stream
+is up" rule (188 x 200 bytes).  Every stage stamped at 50 ms.  RF33, Antenna B, on air.  One run
+each; a single run carries about +-1 s of where in the 2 s MPU the tune happens to land.
+
+| run | what changed | first picture |
+|---|---|---|
+| base | as shipped (viewer defaults: muxer `--lag 25 --chunk 3`) | 42.86 s |
+| lag4 | muxer `--lag 4 --chunk 1`, audio passes every 2 s | 19.04 s |
+| fix1, p2a, w1 | the chain-side cuts below, as they landed | 18.27, 16.72, 16.31 s |
+| l0a | muxer `--lag 0` | 14.84 s |
+| sb1 | audio workers in standby | 13.24 s |
+| fw1 | audio workers follow the lane (and a lost `live.json` write, below) | 15.79 s |
+| fw2, fw3 | the `live.json` write retried | 13.97, 12.98 s |
+| bp1 | level protected against an A-SPX burst (below); 60 s held | 14.59 s |
+
+fw3 by stage: decoder prewarmed 8.23 s, bootstrap 9.68, video lane 11.66, lanes announced 11.66,
+English wav usable 12.29, muxer started 12.40, sink flows 12.98.  bp1 is the same code plus the
+level change; its video asset locked 2 s after the first asset (13.16 against 11.21), the MPU
+boundary, not the code.  Every run: 0 decode errors in the muxed stream, no BREAK or overflow in
+the chain log, the radio handed back.
+
+**What was cut, each with its own measurement.**
+
+- *The first decode.*  A live gpu-full chain built all 36 of a Frame's frequency-interleaver
+  sequences inside its first `decode_frame` (48 ms each on 8K, a Python loop holding the GIL;
+  1.7 s), the radio reader starved behind it, the SDR buffer overflowed and the chain re-acquired:
+  2 s of every channel change.  `lab/m3_freqint.py` now makes the sequences as arrays, gated
+  element for element against the loop over every FFT size, direction and toggle
+  (`lab/gate_fi_sequence.py`: 1680 cases, 0 different).  The first Frame's GPU costs (BICM tables,
+  the first run of every CUDA kernel: 1835 ms, then 809 ms, then 65-85 ms a Frame) are paid before
+  the clock by one synthetic Frame of seeded noise (`_prewarm_gpu` in `lab/m9_fast.py`;
+  `ATSC3_NO_GPU_PREWARM=1` restores the old order).  The GPU path is not bit-reproducible run to
+  run, so this one is proven on air only, not by a byte gate.
+- *The sniffed air.*  On a radio the L1 sniff ends in a gap; replaying it through the front end
+  cost 2.1 s and could not complete an MPU.  It is dropped (`ATSC3_REPLAY_SNIFF=1` restores it; a
+  replay source is untouched).
+- *The lane announcement.*  `live.json` was written at most once a second, so the audio lane's
+  write took the slot and the video lane stayed unlisted until the next MPU: 2.6 s between the
+  video lane existing and the orchestrator hearing of it.  A lane's first segment is now written
+  out at once.
+- *The lost write.*  On Windows `os.replace` onto `live.json` is refused while any reader has the
+  file open, and four processes poll it.  The refusal was swallowed; when the lost write was the
+  one announcing the video lane the workers started 2.0 s late, about one start in three.  A
+  torture test put numbers on the mechanism (2946 of 3000 replaces refused at the first try under a
+  tight reader); the write now retries for up to 40 ms.
+- *The audio worker's start.*  Started when its lane appeared, a worker needed 2.0 s to produce a
+  usable wav, 1.4 s of it the interpreter and its imports.  The orchestrator now starts its
+  workers in `--standby` as soon as the chain is up (decoder loaded, waiting on stdin for the
+  argument list as one JSON line) and hands each its lane; a standby that is never needed is told
+  so and exits 0.  The hand-off is the ordinary command for the supervisor's respawn.  Decode of
+  one lane by a standby worker and by an ordinary one: 100.000 % identical samples.
+- *The audio pass clock.*  Passes on a 2 s clock land at a random phase of the 2 s an MPU takes to
+  arrive, so sound for a slot was ready 0.6 to 2.6 s after the slot, and which, depended on when
+  the worker started (one run held every chunk a whole slot; the next put the first chunk out and
+  the second 4.3 s later).  `--follow` starts a pass when the lane file grows.  The muxer then
+  emits the head slot itself: `lag_s` -2.0 on every chunk.
+- *The muxer's lag.*  `--lag 4` emits slot N only when slot N+1 has arrived: a delay, not a
+  cushion against a late slot.  `--lag 0 --chunk 1` is the low-latency setting; nothing was lost
+  by it in any run.
+
+**Two faults the timing runs surfaced in the sound.**
+
+1. *Per-pass level.*  Each pass was scaled to its own peak, so the level stepped from pass to
+   pass.  The worker now scales by one reference (9.0e5 for the 5.1 element, 2.0e5 for the
+   stereo pair, a little above the loudest sample of nine minutes of this air), kept in the state
+   file.  The English track is about 3 dB quieter than before and steady, the Spanish about 2 dB.
+   OPEN: the stereo element sits 12 dB under the 5.1 on the decoder's scale; whether that is the
+   broadcast or the pair path is not established.
+2. *An A-SPX burst.*  In run fw2 three frames of the Ls/Rs pair came out at 5.7e7, sixty times
+   the loudest programme sample, on a surround pair that idles near 100.  With A-SPX off the same
+   frames peak at 366.  Their envelope indices read 54, 52, 50 where the frames either side read
+   about 6; the gain sits on its 1.58e5 cap; `aspx_balance` goes 1 to 0 at the first of them.
+   It reproduces in a one-pass decode of the kept lane, so it is the decoder (the envelope chain,
+   probably a time-delta read against a frame of the other balance mode), not the live path.
+   ROOT CAUSE NOT FOUND.  What is fixed is the damage: the first version of the level reference
+   followed the burst and the whole English track played 36 dB down from that moment on.  Now
+   (a) a pair frame above twice the reference plays its core, delayed by the 577 samples the
+   A-SPX path delays it, with the two frames after it (`core_for_bursts`; a carried count keeps
+   the result independent of where a pass ends); (b) the reference moves only as far as twice its
+   starting value; (c) anything still above that is clipped and reported, and the reference
+   stays.  On the kept lane, in one pass and in passes of 60 and 49 frames: the burst frames read
+   61-366, no level line, the level after equals the level before, and the output before the
+   burst is sample-identical to the unpatched worker.  The pass line now counts `burst`.
+
+**Noted, not changed.**
+
+- Core-only channels (C, LFE) are 12.5 ms early against the A-SPX-rendered pairs: the 577-sample
+  delay (602 at 48 kHz, correlation 0.997) is not applied to them.  The same holds for a pass
+  that falls back to core-band.
+- One pass and split passes differ by rounding, mostly on L: 99.7 % of samples identical, the
+  rest within 15 LSB, -89 dB.  It predates this session's changes (unpatched worker, passes of 60
+  against 49: the same figure).
+- In bp1 one FEC Block of 17,834 failed on air and took one video MPU with it (a 2.0 s hole in
+  the picture at 54 s; sound continuous).  Reception, not the code.
+
+**Where it stands.**  12.98-14.59 s from the pick to the first picture on RF33, of which about
+8 s is the chain before its first Frame (start, radio, L1 sniff 2.8 s, prewarm).  Next cuts if
+wanted: the L1 plan cached per RF, the muxer started alongside the audio workers.  tvTuna has to
+ask for the low-latency settings (`--lag 0 --chunk 1`, `--audio-extra --follow`) and only from a
+tree that has them.
+
+### 13.33 E136: idle LDPC lanes measured and not built; the int16 kernel's footprint cut instead (2026-11-11)
+
+**The question.**  13.20 measured that a vector of LDPC lanes runs until its slowest lane and
+that perfect compaction would save 26 % of the sweeps.  The item on the list was "skip idle
+lanes".  Measured first, on the banked LLR records (`lab/e136_lane_idle.py` replays the
+per-block iteration counts through the schedules a kernel could run):
+
+- Refilling a retired lane from the same call saves sweeps only on ONE thread: 20 % on calls
+  where every block converges, 14.8 % (strong bank) and 10.6 % (12 dB bank) over the whole
+  shipping mix.  Against today's two threads a call (vectors of 16, 16 and 3 side by side) the
+  refilled single queue loses.  The later ladder rungs gain nothing: what reaches them runs to
+  the abort or to 50 anyway.
+- So idle lanes alone are not worth a kernel.  NOT BUILT.
+
+**What the time is, then** (E131 kernel, 64800-bit 9/15, 35 Blocks a call, this box, decoders
+not pinned):
+
+| | ms a call |
+|---|---|
+| one decoder, 1 thread | 75.8 (25.1 with no sweeps allowed; 1.54 a vector-sweep) |
+| one decoder, 2 / 3 threads | 57.9 / 42.9 |
+| eight decoders at once, 1 thread each | 213-340 |
+| eight decoders at once, 2 threads each | 196-256 |
+
+One decoder alone is three to four times faster than the same decoder among eight: cache, not
+arithmetic (13.29 found the same of every stage).  Inside the kernel (instrumented copy, 420
+blocks, 909 vector-sweeps): sweep 74.7 % (1.221 ms a vector-sweep = 4.3 ns an edge for sixteen
+lanes), syndrome 12.6 % (0.206 ms an iteration), load 10.1 % (4.2 ms a vector), memset 1.2 %,
+retire and unload 1.4 %.  The work buffer of one vector is 11.19 MB (posteriors 2.07, messages
+9.1); a worker pinned by `ATSC3_WORKER_SPREAD=8` owns one 16 MB L3 and runs two vectors at
+once, 22.4 MB.  That is why the second LDPC thread buys nothing in the chain (8x2 21.1 / 20.9 s,
+8x1 22.1 / 21.1 s on the strong bank).
+
+**What was built** (`lab/ldpc_layered_kernel.c`, ABI 7; E131 is exported untouched as
+`ldpc_layered_q16_ref` and is the referee):
+
+- `ldpc_layered_q16` ("dense"): E131's layout with the load vectorised (sixteen values a lane
+  per step through a 16x16 int16 transpose; same rounding, same clamp, the same result for NaN
+  and infinities), no memset (the first sweep takes the messages as zero) and a syndrome that
+  stops at the first bad check of every live lane whenever only "zero or not" is asked (exact
+  counts are still taken on the last iteration and wherever an abort rule reads them).
+- `ldpc_layered_q16c` ("packed"): the same decoder with the check-node messages not stored per
+  edge.  A min-sum check sends only two magnitudes, so a check keeps `min1`-derived and
+  `min2`-derived magnitudes and the index of the first minimum (48 int16 for sixteen lanes) and
+  an edge keeps one uint16 of signs, one bit a lane.  The message is rebuilt when the edge is
+  next read.  5.13 MB a vector instead of 11.19 MB; two vectors fit one L3.
+- `ATSC3_LDPC_Q16_KERNEL=packed|dense|ref` (lab/m3_ldpc.py), default `packed`.
+
+**The gate** (`lab/gate_e136_q16.py`): every banked record that kept its LLRs, three banks
+(`ldpc_dump_strong_e121`, `ldpc_dump_n12_e121`, `ldpc_dump_llr`: 140 records, 3,930 blocks, all
+rungs at their own alpha), in the shipping vectors of sixteen, under six settings (shipping
+abort; correction off; no abort; stall rule on; abort_k alone; an early absolute threshold):
+bits, conv, its and bad of every block identical to E131 for both kernels, 0 different in
+23,580 block decodes each.  The load alone (posteriors after a 0-iteration call) identical
+element for element on real LLRs at 1, 2, 3, 7, 8, 9, 15 and 16 lanes, on NaN / inf / 1e30 /
+range edges, on exact halves, on zeros.  Lane counts 1..16 identical.  A 16200-bit code (not a
+multiple of 16: the scalar tail), 168 decodes, identical.  `gate_e130_q8.py --q16` still PASS.
+
+**Time.**
+
+| 35-Block call, ms (two rounds) | E131 | dense | packed |
+|---|---|---|---|
+| one decoder, 1 thread | 73.6, 72.1 | 63.4, 54.2 | 54.4, 54.8 |
+| one decoder, 2 threads | 60.6, 62.0 | 49.2, 48.1 | 49.8, 53.0 |
+| eight at once, pinned as the chain pins them, 1 thread | 109.0, 119.7 | 95.3, 130.9 | 77.3, 62.9 |
+| eight at once, pinned, 2 threads | 112.4, 126.2 | 112.0, 105.4 | **61.0, 64.5** |
+| eight at once, not pinned, 2 threads | 212.3, 216.9 | 188.8, 185.5 | 123.9, 122.5 |
+
+Whole chain, `ATSC3_WORKER_SPREAD=8`, 8 workers x 2 threads, same session, runs interleaved:
+
+| bank | | E131 | dense | packed |
+|---|---|---|---|---|
+| `rf25_win_45s_b` (45 s) | wall, s | 20.55, 20.32, 20.84 | 21.05 | **18.60, 18.65, 19.31, 18.59** |
+| | LDPC stage, ms a Frame | 291, 289, 302 | 302 | 223, 223, 267, 215 |
+| | Blocks | 4887 / 5986 | same | same |
+| `rf25_win_n12` (12 dB copy) | wall, s | 32.42, 32.25 | 31.91, 30.94 | **28.38, 28.41** |
+| | LDPC stage, ms a Frame | 415, 431 | 416, 384 | 299, 297 |
+| | Blocks converged | 1551 | 1551 | 1551 |
+
+The lane files are byte-identical across all three kernels on both banks (32 chain runs, one hash a
+bank).  So: LDPC stage 23-29 % shorter in the chain, the replay 9-12 % shorter; 2.41x real time
+on the strong bank (was 2.19x), 1.58x at 12 dB (was 1.39x).  The chain gains less than the
+bare decoder (47 % there) because the demapper, the CPE and the equaliser share the same cache.
+"dense" pays only alone: with eight at once its 11 MB buffer is still the cost, so it is kept
+as a selectable step and not used.
+
+Layouts with the packed kernel, strong bank, two runs each: 8x2 18.65 / 19.31 s, 8x3 17.67 /
+18.11, 8x4 18.57 / 17.50, 12x2 18.92 / 18.47, 16x2 19.01 / 20.27, 16x1 20.93 / 21.20.  8x3 and
+8x4 may be worth half a second; inside the run-to-run spread, the recipe stays 8x2.
+
+**Not built, with the number.**  The batch mean |LLR| without its 9 MB temporary: 3.31 ms down
+to 2.88 ms a call, identical value on 100 records; under 1 % of a call.
+
+**Noted.**  On the 12 dB bank the report's `fec_total` reads 5250 on some runs and 4970 on
+others (eight Frames), with any of the three kernels, E131 included; converged Blocks (1551)
+and the lane bytes do not move.  Not looked into.
+
+**Not measured.**  The 6-core machine, which is where this was meant to matter: six workers
+sharing one L3 are the "not pinned" row above, where packed is 42 % shorter a call.  It needs a
+run there.
+
+### 13.34 The referee at the cliff: OnAir's `atsc3rx` on the marginal RF25 banks (2026-11-11)
+
+13.28 put the same two clean 20 s banks through both receivers; the 27 PLP 1 Blocks it showed us
+missing on RF33 were found in 13.30.  What had never been refereed is the regime we tune for:
+the Core layer at its threshold.  Their `atsc3rx` (build of 2026-11-08, 12 threads; it has no
+LDM, the Core is decoded as a plain PLP with the Enhanced layer as noise) on the 45 s RF25 bank
+and its noisy copies, converted to cf32 (`C:\captures\onair\ref_2026-11-11_*.txt`):
+
+| bank | OnAir: baseband packets good / bad | OnAir Core Blocks good (see below) | ours, Core Blocks converged / judged |
+|---|---|---|---|
+| `rf25_win_45s_b` | 802 / 6342 | about 95 of 6437 | **4887 / 5986** |
+| `rf25_win_n20` | 708 / 6436 | about 1 | **4570 / 5986** |
+| `rf25_win_n15` | 707 / 6437 | 0 | **3701 / 5920** |
+| `rf25_win_n12` | 707 / 6437 | 0 | **1551 / 5250** |
+
+Their counter is one total for every PLP, and "bad" also takes header failures and Blocks cut
+by the ends of the file, so the split is an estimate.  The 707 that survive any amount of added
+noise are the QPSK 2/15 PLP 16 (3.82 a Frame); good plus bad is 7144 on every bank, which
+leaves about 6437 for the Core, and what they decode of the Core is the excess over 707.  The
+link layer agrees: 299 UDP datagrams on the base bank, 43-44 on each noisy copy (ours: 17,337
+on the base bank, 16,143 at 20 dB, 12,972 at 15 dB).  0 service list tables and 0 bytes of
+transport stream on all four.  Both receivers find the same 185 Frames; their carrier offset
+reads 387.1-388.3 Hz.  Their run takes 161-165 s for 45 s of air (0.3x; "frame cut and
+resampling" 136-140 s of it), ours 18.6-28.4 s.
+
+What it says: on the clean RF25 bank of 13.28 they carried the whole Core out; on this one,
+where the Core sits at its threshold (E69: 2.25 dB with the Enhanced layer counted as noise),
+they decode 1.5 % of it and we decode 76 % of what was on air (82 % of what we judged).  That
+gap is 13.20's ladder and box-plus, now measured against somebody else's decoder instead of our
+own earlier one.  The referee cannot show packets we leave here, because it leaves nearly all
+of them.
+
+What we do leave, by our own count: 185 Frames carry about 6471 Core Blocks and 5986 were
+judged (177 of 185 Frames reached the FEC); the 485 never judged are the Frames around the one
+lock loss (Frame 72, inside a fade where the FEC had already collapsed; re-acquired at Frame
+74) and the interleaver's fill at each end.  That, not the decoder, is the visible shortfall
+on this bank.
+
+Not run: their ATSC 1.0 tool (`dect2cli`) against STVT; STVT was refereed against stock
+`dtv.atsc_rx` on 2026-11-10.
+
+Seen while reading how their file player takes input (described, nothing copied): the IQ-file
+probe works out a header offset, an end and a byte order, and the caller that starts playback
+does not carry them over, so a WAV file's header is played as samples.  A raw `.cs16`, or SigMF
+with a separate data file, is not affected.  Worth offering to their team with the write-up.
+
+Ideas only cross this line, as before: no line of their source is in this tree.
+
+### 13.35 tvTuna's engine on a banked capture, on the 6-core box: first byte in 9.5-10.5 s, and the file sink's unstitched seams (2026-11-11, Omarchy, Ryzen 1600X 6c/12t, Python 3.14.8, ffmpeg 9.0.2)
+
+No radio.  tvTuna 47cacfd, this tree at 15d279c, `lab/ldpc_layered_kernel.so` rebuilt (ABI 7,
+`gate_e107_ldpc.py` PASS: flooding 21961 ms, layered 3400 ms, layered+abort 2165 ms).  tvTuna's
+tests: 13 passed, 0 failed.  `tvtuna doctor`: 15 PASS / 1 FAIL / 3 SKIP (the FAIL: this box's STVT
+checkout is `rig-live`, which lacks the 11-09 gain-step fix; `main` and `pi-port-radiopi2` have it).
+
+`tvtuna engine` unmodified, the chain's replay options handed in through the remembered-gains
+entry of a scratch channel table: `--capture long_rf33.cs16 --rate 8e6 --realtime --shed`
+(120 s, 485 Frames).  Loopback only.  A client from the tune (36 s recorded), then a second
+client taking the socket 46 s after the tune (36 s).  Three runs.
+
+| | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| `tune` -> `up` event | 10.24 s | 9.44 s | 9.45 s |
+| `tune` -> first TS byte at the client (nulls not counted) | 10.52 s | 9.51 s | 9.51 s |
+| client 1: first video packet / decoded picture | K / I | K / I | K / I |
+| client 1, 30 s: pictures; HEVC+AC-3+MP2 decoder lines | 1799; 0 | 1799; 0 | 1799; 0 |
+| client 2: first byte after connect; first picture | 14 ms; K / I | 6 ms; K / I | 6 ms; K / I |
+| client 2, 30 s: pictures; decoder lines | 1799; 0 | 1799; 0 | 1799; 0 |
+| demuxer `Packet corrupt` per 30 s (client 1 / client 2) | 16 / 15 | 16 / 15 | 16 / 15 |
+
+On air 13.32 measured 13-15 s; the replay has no radio open and no AGC settle, and a file's
+bootstrap is found at 4 s (prewarm 1.07 s, bootstrap 18:34:52 after a start at 18:34:46).
+
+**The receiver.**  Paced, to the end (runs 2 and 3, identical): 485 of 485 Frames, 119.849 s
+of air in 119.360 s = 1.0041x, FEC 35890/35890 (= 485 x 74, nothing shed), BCH zero 35890,
+0 ALP resyncs, 0 re-acquisitions, 0 restarts, 237 MPUs complete and 3 lost (the same in every
+run: the capture's ends), 0 sequence breaks.  5 s reports over the three runs: 0.99x-1.16x,
+raw queue 7 while starting then 0, 0 underruns.  Per Frame (budget 247.11 ms): front end
+225.0-225.3 (notch 105.4-105.9, resample 98.4-98.6), decode 233.7-234.2 (ldpc 124.2-124.6,
+gpu_bicm 83.1-84.0); slowest stage 1.05-1.06x.  Muxer 224-227 ms per 2 s chunk, dropped 0,
+fails 0, stall 0.  Audio 2.36-2.47x, pad 0, behind 0.  Not paced, lossless, whole stack up
+(one run): 119.849 s in 112.117 s = 1.0690x.  So: it keeps up, with 7 % in hand.
+
+**Found: the file sink is not stitched.**  `TsStitch` (E97) rewrites the continuity counters
+across chunks, but only inside `PipeFeed` (the player pipe).  The `--out` file sink, the one
+tvTuna serves, is written chunk by chunk as ffmpeg made it: in a 36 s recording every PID's
+counter restarts 16-18 times, no discontinuity_indicator set, TEI 0.  ffmpeg's demuxer flags
+the first video packet of each 2 s slot, the keyframe.  Decoders: unaffected (0 lines, 1799 of
+1799).  With `-fflags +discardcorrupt`, which tvTuna's own ffplay command uses, the same 30 s
+gives 1786 pictures (one recording measured).  E97's symptom, back through the other door.
+Not fixed here: this session measured.  The fix is the stitch on the file-sink writes
+(`sink.write(out_b)` at the two v2 sites).
+
+`tvtuna engine --replay` on the sink file itself (53 MB, 3.60 Mb/s from its PCR), three runs:
+first TS byte 2-3 ms after `tune`, keyframe, 1799 pictures, 0 decoder lines, 16 flags.

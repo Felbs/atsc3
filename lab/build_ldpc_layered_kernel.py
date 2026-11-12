@@ -100,8 +100,8 @@ def smoke(path):
     dll = ctypes.CDLL(path)
     dll.ldpc_layered_abi.restype = ctypes.c_int32
     abi = int(dll.ldpc_layered_abi())
-    if abi not in (4, 5, 6):
-        return f"ABI {abi} not in (4, 5, 6)"
+    if abi not in (4, 5, 6, 7):
+        return f"ABI {abi} not in (4, 5, 6, 7)"
     i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
     f32 = np.ctypeslib.ndpointer(np.float32, flags="C")
     u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")
@@ -142,6 +142,27 @@ def smoke(path):
     want_its = np.tile(its, 10)[:m]
     if not (conv19.all() and (its19 == want_its).all() and bits19.sum() == 0):
         return f"pack: conv {conv19} its {its19} (want {want_its})"
+    if abi >= 7:
+        # E136: the three int16 kernels on the same two words; the real gate is lab/gate_e136_q16.py
+        i16 = np.ctypeslib.ndpointer(np.int16, flags="C")
+        got = []
+        for name in ("ldpc_layered_q16_ref", "ldpc_layered_q16", "ldpc_layered_q16c"):
+            fn = getattr(dll, name)
+            fn.restype = ctypes.c_int32
+            fn.argtypes = [f32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32, i32, i32,
+                           ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_int32, ctypes.c_int32,
+                           ctypes.c_int32, ctypes.c_int32, u8, u8, i32, i32, i16]
+            b16 = np.zeros((2, n), np.uint8); c16 = np.zeros(2, np.uint8)
+            i16o = np.zeros(2, np.int32); d16 = np.zeros(2, np.int32)
+            w16 = np.zeros((n + 6) * 16 + 3 * 48, np.int16)
+            rc = fn(llr, 2, n, 3, 6, cptr, cidx, 10, 0.75, 256.0, 1, 0, 0, 0, b16, c16, i16o, d16, w16)
+            if rc != 0:
+                return f"{name} returned {rc}"
+            got.append((b16.tobytes(), c16.tobytes(), i16o.tobytes(), d16.tobytes()))
+            if not (c16.all() and b16.sum() == 0 and i16o[0] == 0):
+                return f"{name}: conv {c16} its {i16o} bits {b16.sum()}"
+        if not (got[0] == got[1] == got[2]):
+            return "the int16 kernels disagree with their reference"
     return None
 
 def main(argv=None):
