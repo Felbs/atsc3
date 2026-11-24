@@ -85,7 +85,11 @@ def hdhr_channel_for(rf):
     port, the referee is measuring A DIFFERENT ANTENNA. It can then tell
     you THE AIR MOVED; it can never tell you OUR FEED IS HEALTHY. Do not
     quote it as agreement or disagreement across an antenna change."""
-    lo = (174 + (rf - 7) * 6) if rf < 14 else (470 + (rf - 14) * 6)
+    # US allocations are not one arithmetic run: ch2-4 54-72 MHz, 72-76 is
+    # aeronautical, ch5-6 76-88, high VHF restarts at 174 (ch7-13), UHF at 470.
+    # The old one-liner sent ch2-6 to 144-168 MHz (ch6 -> 168, not 85).
+    lo = (54 + (rf - 2) * 6 if rf < 5 else 76 + (rf - 5) * 6 if rf < 7
+          else 174 + (rf - 7) * 6 if rf < 14 else 470 + (rf - 14) * 6)
     return "atsc3:%d" % int((lo + 3.0) * 1e6)
 
 
