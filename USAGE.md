@@ -127,31 +127,47 @@ inspector, not a key.
 ## 6. Pick the transport: MMTP or ROUTE
 
 ATSC 3.0 delivers media over one of two transports, and this receiver decodes
-both:
+both. MMTP services are found and carried automatically. A ROUTE/DASH service
+is carried only when you name its flow — `--route` takes the flow's
+destination **IP:PORT**, not a bare switch:
 
 ```
-python -m atsc3 watch --rf N            # MMTP (default when present)
-python -m atsc3 watch --rf N --route    # ROUTE/DASH service
+python -m atsc3 watch --rf N                              # MMTP (automatic)
+python -m atsc3 watch --rf N --route 239.255.45.100:5000  # also carry this ROUTE flow
 ```
 
-Some ROUTE services on a multiplex are ones a commercial NextGen tuner will not
-present at all. Use `--route` to select the ROUTE path when a multiplex carries
-one.
+The chain log names every ROUTE flow it sees but was not asked to carry
+(`flow gate: 239.x.x.x:port is ROUTE/LCT ... rerun with --route ...`), so run
+once without it and copy the address from there. Check what a flow is with
+`tools/atsc3_inspect.py` first: some ROUTE flows are data (no audio/video
+lanes appear), and DRM-locked services are never decrypted (section 5).
+A ROUTE service that rides Subframe 1 / PLP 1 also needs `--plp1`.
 
 ---
 
-## 7. Decode the LDM (enhanced) layer
+## 7. LDM carriers (`--ldm auto|off`)
 
-Layered-Division Multiplexing stacks two signals on one channel — a robust core
-layer and a higher-capacity enhanced layer. The enhanced layer is heavier to
-decode:
+Layered-Division Multiplexing stacks two signals on one channel — a robust
+**core** layer and a higher-capacity **enhanced** layer. At tune time the
+receiver reads L1 and, when it signals LDM with the convolutional time
+interleaver, decodes the **core** layer through the LDM path; nothing has to
+be passed for that:
 
 ```
-python -m atsc3 watch --rf N --ldm
+python -m atsc3 watch --rf N            # --ldm auto (default): identified from L1
+python -m atsc3 watch --rf N --ldm off  # force the non-LDM path, skip the check
 ```
 
-This path is **not real-time yet** on the reference hardware — it decodes
-correctly but below 1× — so treat it as a recording/analysis mode for now.
+`--ldm` takes `auto` (default) or `off` only; it does **not** switch on the
+enhanced layer. The **enhanced layer is not decoded live.** On the reference
+site it is measured several dB below the SNR it needs (docs/ARCHITECTURE.md),
+so services carried only in the enhanced layer do not play. The core layer of
+an LDM carrier runs in real time on a 6-core CPU.
+
+On a weak start L1 may not verify at once. The chain then reads more air and
+asks again (up to four rounds, `ATSC3_SNIFF_ROUNDS`); if L1 still does not
+verify and the non-LDM path then decodes nothing, it identifies the multiplex
+again after a few re-acquisitions instead of staying on the wrong decoder.
 
 ---
 
