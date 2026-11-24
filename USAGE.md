@@ -198,6 +198,11 @@ Run `python -m atsc3 watch --help` for the complete list.
    [INSTALL.md](INSTALL.md) step 2.
 4. Live stutters but a `--capture` replay is clean? That is a real-time /
    throughput limit on your CPU, not a decode error — see the tuning table above.
+5. The supervisor (`tools/atsc3_run.py`) restarts a chain that dies. When the
+   chain died with a Python traceback it first writes `crash_<time>.txt` in the
+   live directory (the traceback and the 40 log lines before it) and raises a
+   desktop notification; `ATSC3_CRASH_STOP=1` makes it stop instead of
+   restarting, so the bug can be looked at.
 
 For the science of *why* each of these stages exists, see the
 [how-it-works explainer](https://felbs.software/atsc3). <!-- scrub-allow: HOST_USER public project domain, not the box login -->
