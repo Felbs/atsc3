@@ -504,9 +504,10 @@ def main():
                          "of silence at the lag point (measured 8/08 00:26). "
                          "DVR renders want 0; live wants ~120.")
     ap.add_argument("--channels", type=int, choices=(2, 6), default=2,
-                    help="2 = stereo pair, keeps up live (1.27x); 6 = full "
-                         "5.1, measured 0.62x even threaded -- recordings "
-                         "only until the filterbank is faster")
+                    help="2 = stereo (of a 5.1 element: a downmix that "
+                         "keeps the centre); 6 = full 5.1. With libac4dec "
+                         "both run at 14x real time or more on one core; the "
+                         "python decoder measured ~3x (5.1) / ~5x (stereo)")
     ap.add_argument("--max-pass", type=int, default=1800,
                     help="most AC-4 frames decoded in one pass (1800 = 60 s; "
                          "bounds memory after a stall). With --once, a small "
@@ -516,6 +517,13 @@ def main():
                     help="decoder-scale level that is written at 0.9 of full "
                          "scale; 0 = the default for the element (see "
                          "REF_PEAK in the code)")
+    ap.add_argument("--decoder", choices=("auto", "lib", "python"),
+                    default=os.environ.get("ATSC3_AC4_BACKEND", "auto"),
+                    help="AC-4 decoder: lib = libac4dec, the ac4-decoder C "
+                         "library (full SAP, A-CPL 5.1 upmix, the A-SPX "
+                         "fixes, concealment; lab/m45_ac4_lib.py); python = "
+                         "the receiver's own m42 decoder; auto (default, or "
+                         "$ATSC3_AC4_BACKEND) = lib when it loads, else python")
     ap.add_argument("--standby", action="store_true",
                     help="start, load the decoder, then wait for the real "
                          "argument list as one JSON line on stdin (an empty "
@@ -536,6 +544,11 @@ def main():
         import m38_resample                                     # noqa: F401
         import m30_filterbank                                   # noqa: F401
         import m42_ac4_stream                                   # noqa: F401
+        try:
+            import m45_ac4_lib
+            m45_ac4_lib.load_lib()
+        except Exception:                                      # noqa: BLE001
+            pass                    # said again, with the reason, below
         line = sys.stdin.readline()
         if not line.strip():
             return 0
@@ -639,10 +652,50 @@ def main():
     # until 8/07 this worker synthesized only the first pair and the rest
     # went to silence. Order L R C LFE Ls Rs = the standard WAV 6-channel
     # layout, so the file IS a 5.1 file without any channel map.
-    chans = Ac4Stream.CHANS if a.channels == 6 else ("L", "R")
+    out_chans = Ac4Stream.CHANS if a.channels == 6 else ("L", "R")
+    # 2026-09-27 (d6b0b9c), restored 2026-11-24: "stereo" must CARRY THE
+    # DIALOGUE. --channels 2 of a 5_X element synthesised only L and R and
+    # dropped the centre -- where the voice lives (measured: C -28 dBFS vs
+    # L -31 on a news programme; stereo-L was 1.00-correlated with L and
+    # 0.19 with C at +12.5 ms = only the room's reverb of the voice
+    # survived, heard as "far away, echoing"). E98 hit the same thing on
+    # 8/22. The 11-01 snapshot (9d46747) replaced this file with the private
+    # line's copy, which never had the fix -- a lost commit, not a decision.
+    # libac4dec: the standard's LoRo downmix with the stream's coefficients
+    # (centre AND surrounds). The python fallback: the centre is synthesised
+    # too and folded in at -3 dB (ITU-R BS.775): L' = L + 0.707 C,
+    # R' = R + 0.707 C. ATSC3_STEREO_CENTRE=0 restores the L/R-only pair
+    # (python decoder only).
+    stereo_centre = (a.channels == 2 and a.element != "pair"
+                     and os.environ.get("ATSC3_STEREO_CENTRE", "1") != "0")
+    chans = (Ac4Stream.CHANS if a.channels == 6
+             else (("L", "R", "C") if stereo_centre else ("L", "R")))
+    c_tail = np.zeros(HF_DELAY)     # the folded centre's delay line
     acpl3_said = [False]
+    # THE DECODER. libac4dec (lab/m45_ac4_lib.py says what it fixes and why
+    # it is called rather than back-ported); the receiver's own m42 path is
+    # the fallback, chosen once, here, never switched mid-stream.
+    libdec = None
+    if a.decoder != "python":
+        try:
+            from m45_ac4_lib import LibAc4Stream                # noqa: E402
+            libdec = LibAc4Stream(element=a.element, channels=a.channels)
+            print(f"  decoder: libac4dec ({libdec.lib._atsc3_path}), "
+                  f"lookahead {libdec.lookahead} frames"
+                  + (", stereo = LoRo downmix (centre + surrounds folded in)"
+                     if a.channels == 2 and a.element != "pair" else ""),
+                  flush=True)
+        except Exception as e:                                 # noqa: BLE001
+            if a.decoder == "lib":
+                print(f"  libac4dec requested and unavailable: {e}",
+                      file=sys.stderr)
+                return 1
+            print(f"  decoder: python (m42) -- libac4dec unavailable: "
+                  f"{str(e)[:300]}", flush=True)
+    else:
+        print("  decoder: python (m42), as asked", flush=True)
+    dec = libdec if libdec is not None else Ac4Stream(element=a.element)
     wav = WavAppender(out, ch=a.channels, resume=resume_n)
-    dec = Ac4Stream(element=a.element)
     LEAD = 4                        # frames of QMF lead-in, discarded
     MAX_PASS = max(8, a.max_pass)   # 60 s of audio; caps peak RSS
     # ONE LEVEL FOR THE WHOLE STREAM.
@@ -783,6 +836,21 @@ def main():
                 lead_pcm = {k: np.zeros(0) for k in ("L", "R", "Ls", "Rs")}
                 lead_groups = {"lr": [], "sr": []}
                 hf_state = {"lr": [None], "sr": [None]}
+                c_tail = np.zeros(HF_DELAY)
+                if libdec is not None:
+                    # the old file's last frames are still in the decoder's
+                    # delay line: they belong to the wav before the new
+                    # generation's anchor, so drain them there
+                    tl = libdec.push([], final=True)
+                    n_t = len(next(iter(tl.values()))) if tl else 0
+                    if n_t:
+                        yt = np.column_stack([tl[k] if k in tl
+                                              else np.zeros(n_t)
+                                              for k in out_chans])
+                        yt = rs_stream.push(yt * (0.9 / ref_peak))
+                        wav.append(yt)
+                        total_media += len(yt) / OUT_FS
+                    libdec.reset(0)     # new file, new stream, frame 0
                 # `first_slot`, not `first_seq` -- the state FILE calls it
                 # first_seq but the loop variable is first_slot, and resetting
                 # the wrong name would silently leave the old lane's anchor in
@@ -821,105 +889,130 @@ def main():
                 # is bounded by MAX_PASS instead of by how far behind we are.
                 new = pending[:MAX_PASS]
                 behind = len(pending) - len(new)
-                wins6, lens6, grp6, cnts6 = dec.decode_frames(new, chans)
-                # SIX filterbanks in parallel. Sequential synthesis measured
-                # 0.77x real time -- and a worker under 1.0x falls behind
-                # FOREVER (E13). NumPy releases the GIL inside its kernels
-                # (the same fact the whole m11 pipeline is built on), so the
-                # six independent channels thread cleanly.
-                # GROUPED BATCH synthesis (E39): channels sharing a
-                # frame's framing run through ONE dct call. The threaded
-                # version measured 0.62x -- the GIL serialised the many
-                # small windows; batching amortises them instead.
-                pcm, fb_state = FB.synthesise_frames(
-                    wins6, lens6, cnts6, 1536,
-                    states=fb_state, return_state=True)
-                # 13.25: an ASPX_ACPL_3 programme (RF25's 5.1) is a two-
-                # channel core plus A-CPL; the decoder gives L/R only.  The
-                # wav keeps the channel count it was opened with, so the
-                # four channels that do not exist as coded channels are
-                # written silent (A-CPL upmix is not built).
-                if len(pcm) < len(chans):
-                    if not acpl3_said[0]:
-                        acpl3_said[0] = True
-                        print(f"  stream is ASPX_ACPL_3 (2-ch core + A-CPL): "
-                              f"rendering L/R; {[k for k in chans if k not in pcm]} "
-                              f"written silent", flush=True)
-                    n_ref = len(next(iter(pcm.values())))
-                    for k in chans:
-                        if k not in pcm:
-                            pcm[k] = np.zeros(n_ref)
-                # Six independent framings must still agree on TOTAL samples
-                # -- every frame is one frame long on every channel. If they
-                # ever disagree, crop to the shortest and SAY so; a silent
-                # crop here would be a slow A/V drift downstream.
-                ns = {len(v) for v in pcm.values()}
-                if len(ns) != 1:
-                    n_min = min(ns)
-                    print(f"  ! channel lengths disagree {sorted(ns)} -- "
-                          f"cropping to {n_min}")
-                    pcm = {k: v[:n_min] for k, v in pcm.items()}
-                # A-SPX per PAIR: L/R rides group stream "lr", Ls/Rs rides
-                # "sr", each with its own lead-in -- the QMF bank has filter
-                # memory and the envelopes are delta-coded per pair. 4 frames
-                # of lead is 133 ms against a 577-sample group delay. The
-                # centre stays core-band until a mono HF path exists and is
-                # gated (its 1-ch block IS parsed, keeping state warm).
-                if dec.cfg is not None:
-                    for (ka, kb), gkey in ((("L", "R"), "lr"),
-                                           (("Ls", "Rs"), "sr")):
-                        if ka not in chans:
-                            continue
-                        gl = grp6[gkey]
-                        if any(g is not None for g in gl):
-                            lead = min(len(lead_pcm[ka]), LEAD * 1536)
-                            pa = np.concatenate([lead_pcm[ka][-lead:],
-                                                 pcm[ka]])
-                            pb = np.concatenate([lead_pcm[kb][-lead:],
-                                                 pcm[kb]])
-                            gg = lead_groups[gkey][-LEAD:] + gl
-                            n_lead = len(gg) - len(gl)
-                            hs, slog = hf_state[gkey], []
-                            try:
-                                hf, _n = R37.apply_hf_pair(
-                                    pa, pb, gg, dec.cfg,
-                                    state0=hs[max(0, len(hs) - 1 - n_lead)],
-                                    state_log=slog)
-                                pcm[ka], pcm[kb], nb_, hf_hot[gkey] = \
-                                    core_for_bursts(
-                                        hf["L"][lead:], hf["R"][lead:],
-                                        pa, pb, lead, BURST, hf_hot[gkey])
-                                if nb_:
-                                    n_burst += nb_
-                                    print(f"  ! A-SPX burst on {ka}/{kb}: "
-                                          f"{nb_} frame(s) above "
-                                          f"{BURST:.3g} play CORE-BAND "
-                                          f"({n_burst} so far)", flush=True)
-                                hf_state[gkey] = slog[-(LEAD + 1):]
-                            except Exception as _hfe:          # noqa: BLE001
+                if libdec is not None:
+                    # libac4dec streams: no passes, no lead-in, A-SPX /
+                    # A-CPL / alignment inside. Its output runs lookahead + 1
+                    # frames behind what was fed, so the batch it gives
+                    # starts at lane frame y_lane0, not at `cursor`. At the
+                    # end of a recording (--once, nothing behind) it drains.
+                    libdec.align(cursor)
+                    y_lane0 = libdec.out_frame
+                    pcm = libdec.push(new, final=bool(a.once and not behind))
+                    n_out = len(next(iter(pcm.values()))) // 1536
+                else:
+                    y_lane0, n_out = cursor, len(new)
+                    wins6, lens6, grp6, cnts6 = dec.decode_frames(new, chans)
+                    # SIX filterbanks in parallel. Sequential synthesis measured
+                    # 0.77x real time -- and a worker under 1.0x falls behind
+                    # FOREVER (E13). NumPy releases the GIL inside its kernels
+                    # (the same fact the whole m11 pipeline is built on), so the
+                    # six independent channels thread cleanly.
+                    # GROUPED BATCH synthesis (E39): channels sharing a
+                    # frame's framing run through ONE dct call. The threaded
+                    # version measured 0.62x -- the GIL serialised the many
+                    # small windows; batching amortises them instead.
+                    pcm, fb_state = FB.synthesise_frames(
+                        wins6, lens6, cnts6, 1536,
+                        states=fb_state, return_state=True)
+                    # 13.25: an ASPX_ACPL_3 programme (RF25's 5.1) is a two-
+                    # channel core plus A-CPL; the decoder gives L/R only.  The
+                    # wav keeps the channel count it was opened with, so the
+                    # four channels that do not exist as coded channels are
+                    # written silent (A-CPL upmix is not built).
+                    if len(pcm) < len(chans):
+                        if not acpl3_said[0]:
+                            acpl3_said[0] = True
+                            print(f"  stream is ASPX_ACPL_3 (2-ch core + A-CPL): "
+                                  f"rendering L/R; {[k for k in chans if k not in pcm]} "
+                                  f"written silent", flush=True)
+                        n_ref = len(next(iter(pcm.values())))
+                        for k in chans:
+                            if k not in pcm:
+                                pcm[k] = np.zeros(n_ref)
+                    # Six independent framings must still agree on TOTAL samples
+                    # -- every frame is one frame long on every channel. If they
+                    # ever disagree, crop to the shortest and SAY so; a silent
+                    # crop here would be a slow A/V drift downstream.
+                    ns = {len(v) for v in pcm.values()}
+                    if len(ns) != 1:
+                        n_min = min(ns)
+                        print(f"  ! channel lengths disagree {sorted(ns)} -- "
+                              f"cropping to {n_min}")
+                        pcm = {k: v[:n_min] for k, v in pcm.items()}
+                    # A-SPX per PAIR: L/R rides group stream "lr", Ls/Rs rides
+                    # "sr", each with its own lead-in -- the QMF bank has filter
+                    # memory and the envelopes are delta-coded per pair. 4 frames
+                    # of lead is 133 ms against a 577-sample group delay. The
+                    # centre stays core-band until a mono HF path exists and is
+                    # gated (its 1-ch block IS parsed, keeping state warm).
+                    if dec.cfg is not None:
+                        for (ka, kb), gkey in ((("L", "R"), "lr"),
+                                               (("Ls", "Rs"), "sr")):
+                            if ka not in chans:
+                                continue
+                            gl = grp6[gkey]
+                            if any(g is not None for g in gl):
+                                lead = min(len(lead_pcm[ka]), LEAD * 1536)
+                                pa = np.concatenate([lead_pcm[ka][-lead:],
+                                                     pcm[ka]])
+                                pb = np.concatenate([lead_pcm[kb][-lead:],
+                                                     pcm[kb]])
+                                gg = lead_groups[gkey][-LEAD:] + gl
+                                n_lead = len(gg) - len(gl)
+                                hs, slog = hf_state[gkey], []
+                                try:
+                                    hf, _n = R37.apply_hf_pair(
+                                        pa, pb, gg, dec.cfg,
+                                        state0=hs[max(0, len(hs) - 1 - n_lead)],
+                                        state_log=slog)
+                                    pcm[ka], pcm[kb], nb_, hf_hot[gkey] = \
+                                        core_for_bursts(
+                                            hf["L"][lead:], hf["R"][lead:],
+                                            pa, pb, lead, BURST, hf_hot[gkey])
+                                    if nb_:
+                                        n_burst += nb_
+                                        print(f"  ! A-SPX burst on {ka}/{kb}: "
+                                              f"{nb_} frame(s) above "
+                                              f"{BURST:.3g} play CORE-BAND "
+                                              f"({n_burst} so far)", flush=True)
+                                    hf_state[gkey] = slog[-(LEAD + 1):]
+                                except Exception as _hfe:          # noqa: BLE001
+                                    hf_state[gkey] = (
+                                        hs + [hs[-1]] * len(gl))[-(LEAD + 1):]
+                                    self_hf_fail += 1
+                                    if self_hf_fail <= 5 or                                         self_hf_fail % 50 == 0:
+                                        print(f"  ! HF pass failed "
+                                              f"({type(_hfe).__name__}: "
+                                              f"{str(_hfe)[:90]}) -- this pass "
+                                              f"plays CORE-BAND only "
+                                              f"(#{self_hf_fail})", flush=True)
+                                lead_pcm[ka] = pa[-LEAD * 1536:]
+                                lead_pcm[kb] = pb[-LEAD * 1536:]
+                            else:
+                                lead_pcm[ka] = pcm[ka][-LEAD * 1536:]
+                                lead_pcm[kb] = pcm[kb][-LEAD * 1536:]
                                 hf_state[gkey] = (
-                                    hs + [hs[-1]] * len(gl))[-(LEAD + 1):]
-                                self_hf_fail += 1
-                                if self_hf_fail <= 5 or                                         self_hf_fail % 50 == 0:
-                                    print(f"  ! HF pass failed "
-                                          f"({type(_hfe).__name__}: "
-                                          f"{str(_hfe)[:90]}) -- this pass "
-                                          f"plays CORE-BAND only "
-                                          f"(#{self_hf_fail})", flush=True)
-                            lead_pcm[ka] = pa[-LEAD * 1536:]
-                            lead_pcm[kb] = pb[-LEAD * 1536:]
-                        else:
-                            lead_pcm[ka] = pcm[ka][-LEAD * 1536:]
-                            lead_pcm[kb] = pcm[kb][-LEAD * 1536:]
-                            hf_state[gkey] = (
-                                hf_state[gkey] + [hf_state[gkey][-1]]
-                                * len(gl))[-(LEAD + 1):]
-                        lead_groups[gkey] = (lead_groups[gkey] + gl)[-LEAD:]
-                y = np.column_stack([pcm[k] for k in chans])
-                rs0 = resume_skip
-                if resume_skip:
-                    y = y[resume_skip * 1536:]
-                    resume_skip = 0
+                                    hf_state[gkey] + [hf_state[gkey][-1]]
+                                    * len(gl))[-(LEAD + 1):]
+                            lead_groups[gkey] = (lead_groups[gkey] + gl)[-LEAD:]
+                if libdec is None and stereo_centre and "C" in pcm:
+                    c = 0.7071 * pcm["C"]
+                    if dec.cfg is not None:
+                        # L/R went through the A-SPX QMF bank (HF_DELAY
+                        # late); the core-band centre did not. Fold it in
+                        # at the same time, not 12 ms early.
+                        cc = np.concatenate([c_tail, c])
+                        c, c_tail = cc[:len(c)], cc[len(c):]
+                    pcm = {"L": pcm["L"] + c, "R": pcm["R"] + c}
+                n_ref = len(next(iter(pcm.values())))
+                y = np.column_stack([pcm[k] if k in pcm else np.zeros(n_ref)
+                                     for k in out_chans])
+                # the resume settle-frames come off the front of the output;
+                # with libac4dec's delay a first batch can hold fewer
+                rs0 = min(resume_skip, n_out)
+                if rs0:
+                    y = y[rs0 * 1536:]
+                    resume_skip -= rs0
                 # GAP, NEVER SHIFT -- AND IN PLACE, NEVER AT THE END.
                 #
                 # A wav has no timeline. The video container expresses a lost
@@ -931,15 +1024,15 @@ def main():
                 # audible as garble/cut-out/snap per pad event (E59, user-
                 # reported on a dipping band). Each truncated fragment's
                 # missing frames now land AT that fragment's position.
-                ins = pad_insertions(reader.fcounts, anchor_frag, cursor,
-                                     len(new), reader.per_mpu,
-                                     y_first=cursor + rs0)
+                ins = pad_insertions(reader.fcounts, anchor_frag, y_lane0,
+                                     n_out, reader.per_mpu,
+                                     y_first=y_lane0 + rs0)
                 if ins:
                     parts, prev = [], 0
                     for pos, miss in ins:
                         pos = min(pos, len(y) // 1536)
                         parts.append(y[prev * 1536:pos * 1536])
-                        parts.append(np.zeros((miss * 1536, len(chans))))
+                        parts.append(np.zeros((miss * 1536, y.shape[1])))
                         n_padded += miss
                         pad_done += miss
                         prev = pos
@@ -987,12 +1080,17 @@ def main():
                                    pid=lane["pid"], path=out,
                                    wav_base=n_wav0, generation=gen_seen,
                                    channels_coded=(2 if acpl3_said[0]
-                                                   else len(chans))),
+                                                   else a.channels)),
                               open(os.path.splitext(out)[0] + ".json", "w"))
                 cursor += len(new)
                 del pending[:len(new)]
             try:
-                json.dump(dict(lane=os.path.abspath(src), cursor=cursor,
+                # the lane frame the WAV holds audio up to: with libac4dec
+                # that is its output frame (the frames inside its delay line
+                # are not in the wav, and a resume must decode them again)
+                cur_saved = (cursor if libdec is None or libdec.fresh()
+                             else libdec.out_frame)
+                json.dump(dict(lane=os.path.abspath(src), cursor=cur_saved,
                                pad_done=pad_done, wav_samples=wav.n,
                                first_seq=first_slot, generation=gen_seen,
                                ref_peak=ref_peak),
@@ -1005,7 +1103,8 @@ def main():
             # apply_hf_pair mutes the whole pass's top octave, which the
             # listener hears as the sound "going quieter then louder".
             # A counter nobody reads is indistinguishable from zero.
-            print(f"  {cursor} fr ({dec.n_bad} bad), "
+            print(f"  {cursor} fr ({dec.n_bad} "
+                  f"{'concealed' if libdec is not None else 'bad'}), "
                   f"{total_media:.1f} s of audio, "
                   f"pad {n_padded}, behind {behind}, "
                   f"hf_fail {self_hf_fail}, burst {n_burst}, "
@@ -1050,6 +1149,15 @@ def main():
         print("  stopped")
     finally:
         wav.close()
+        if libdec is not None:
+            st = libdec.stats()
+            rs = libdec.reasons()
+            print(f"  libac4dec: {st['n_frames']} frames in, {st['n_ok']} ok, "
+                  f"{st['n_concealed']} concealed"
+                  + (f" {rs}" if rs else "")
+                  + f", {st['n_seq_jumps']} sequence jumps"
+                  + (", ASPX_ACPL_3 upmixed to 5.1" if st["acpl3"]
+                     and a.channels == 6 else ""))
     print(f"  wrote {out}  {total_media:.1f} s")
     return 0
 

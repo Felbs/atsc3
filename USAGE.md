@@ -54,6 +54,16 @@ own AC-4 decoder and offers them as **selectable audio tracks in the player** â€
 switch tracks the same way you would for any multi-audio file. Both are muxed
 into `--record` output, so a recording keeps every language.
 
+**Which AC-4 decoder.** The audio worker uses `libac4dec`, the C library of the
+separate `ac4-decoder` project, when it can load it (full SAP, the A-CPL 5.1
+upmix of ASPX_ACPL_3 programmes, the A-SPX fixes, damaged-frame concealment),
+and falls back to the receiver's own decoder otherwise. It looks for
+`$ATSC3_AC4DEC_LIB`, then `../ac4-decoder/c/libac4dec.so` next to this
+repository (build it with `make -C ../ac4-decoder/c libac4dec.so`). The first
+lines of the audio log say which one is running. `ATSC3_AC4_BACKEND=python`
+forces the old decoder. Stereo from a 5.1 programme is a proper downmix with
+the centre (dialogue) and surrounds folded in.
+
 ---
 
 ## 3. Turn captions on and off
