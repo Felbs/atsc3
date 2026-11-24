@@ -1579,6 +1579,14 @@ class FrameDecoder:
         # and the GPU backends run the pre-E60 code untouched.
         mg = self.margin if (self.cpu_fast and self.backend == "cpu") \
             else M16.OFF
+        # SNR-gated auto-off (see MarginCfg.auto_off_db): the previous frame
+        # this decoder saw said the air has margin, so this frame runs the
+        # pre-E60 paths and keeps only the microsecond SNR read that decides
+        # the next frame. Per-decoder state, like the frame it follows.
+        auto_db = float(getattr(mg, "auto_off_db", 0.0) or 0.0)
+        if auto_db > 0 and getattr(self, "_lean", False):
+            mg = M16.OFF
+            tm["n_lean_frames"] += 1
         rep_d = rep if rep is not None else {}
         if mg.ce_w > 0:
             pool, info = self.cell_pool_fast_sm(y, t0, rep_d)
@@ -1631,10 +1639,26 @@ class FrameDecoder:
         # decodes stay byte-identical to HEAD by construction of the switch.
         snr_db = None
         use_w = False
-        if mg.wllr != "off":
+        if mg.wllr != "off" or auto_db > 0:
             snr_db = M16.frame_snr_db(pool, self.gx.dummy_start)
+            if auto_db > 0 and snr_db is not None:
+                # hysteresis: off at auto_db, back on 2 dB below it; inside
+                # the band the flag is carried unchanged (d2d17db: it must
+                # EXIST there -- reading it unset killed the chain three
+                # times per 10-minute run on 2026-09-27)
+                was = getattr(self, "_lean", False)
+                self._lean = was
+                if snr_db >= auto_db:
+                    self._lean = True
+                elif snr_db < auto_db - 2.0:
+                    self._lean = False
+                if self._lean != was:
+                    print(f"  margin levers {'OFF' if self._lean else 'ON'}: "
+                          f"dummy-cell SNR {snr_db:.1f} dB vs auto-off {auto_db:.0f} dB",
+                          flush=True)
             use_w = (mg.wllr == "on"
-                     or (snr_db is not None and snr_db < mg.snr_gate_db))
+                     or (mg.wllr != "off" and snr_db is not None
+                         and snr_db < mg.snr_gate_db))
             if snr_db is not None and os.environ.get("ATSC3_SNR_LOG"):
                 # E104 gate instrument: one line per frame, grep-able
                 print(f"  SNRLOG frame dummy_snr_db {snr_db:.3f}", file=sys.stderr, flush=True)

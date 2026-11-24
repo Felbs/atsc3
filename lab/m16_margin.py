@@ -79,7 +79,7 @@ class MarginCfg:
     def __init__(self, ce_w=None, ce_detect=None, wllr=None, snr_gate_db=None,
                  sp=None, sp_ms=None, sp_cut=None, sp_iters=None,
                  sp_blocks=None, ce_norm=None, ce_derot=None,
-                 ce_comb=None):
+                 ce_comb=None, auto_off_db=None):
         e = os.environ.get
 
         def num(v, key, dflt, cast):
@@ -119,6 +119,23 @@ class MarginCfg:
         if not master:
             self.wllr = "off"
         self.snr_gate_db = num(snr_gate_db, "ATSC3_SNR_GATE", 16.0, float)
+        # 2026-09-27 (measured on a 2-core laptop, RF33 at 22 dB dummy-cell
+        # SNR): the three levers cost ~7-9 % of chain CPU EACH on healthy
+        # air even when they change nothing (the rescue never fires, the
+        # weights are gated off, but the machinery still runs) - all off is
+        # +20 % (1.24 -> 1.43x offline, FEC 11914/11914 both ways). Live on
+        # that box the couch launcher went from a drifting lag (22 -> 60 s
+        # in 10 min, 5368 audio pads) to a steady one (22-28 s, 2857 pads).
+        # ATSC3_MARGIN_AUTO_OFF=<dB> (0 = disabled, the default, byte-identical
+        # to before): once a frame's dummy-cell SNR reads at or above this,
+        # the NEXT frames skip the lever machinery entirely; 2 dB below it
+        # the levers come back (hysteresis). The WL law shape, applied to
+        # CPU: margin at the cliff, none with margin.
+        # Restored 2026-11-24 (the 11-01 snapshot had dropped it). OFF and
+        # ATSC3_MARGIN=0 carry 0: with no levers there is nothing to switch,
+        # and the exact / GPU paths must not start reading the SNR.
+        self.auto_off_db = (num(auto_off_db, "ATSC3_MARGIN_AUTO_OFF", 0.0, float)
+                            if master else 0.0)
         self.sp = (bool(int(num(sp, "ATSC3_SP", 1, int))) if master else False)
         self.sp_ms = num(sp_ms, "ATSC3_SP_MS", 120.0, float)
         self.sp_cut = num(sp_cut, "ATSC3_SP_CUT", 1500, int)
@@ -132,12 +149,13 @@ class MarginCfg:
         return dict(ce_w=self.ce_w, ce_detect=self.ce_detect,
                     ce_norm=self.ce_norm, ce_derot=self.ce_derot,
                     ce_abs=self.ce_abs, ce_comb=self.ce_comb, wllr=self.wllr,
-                    snr_gate_db=self.snr_gate_db, sp=self.sp,
+                    snr_gate_db=self.snr_gate_db,
+                    auto_off_db=self.auto_off_db, sp=self.sp,
                     sp_ms=self.sp_ms, sp_cut=self.sp_cut,
                     sp_iters=self.sp_iters, sp_blocks=self.sp_blocks)
 
 
-OFF = MarginCfg(ce_w=0, wllr="off", sp=0)
+OFF = MarginCfg(ce_w=0, wllr="off", sp=0, auto_off_db=0)
 
 
 # ---------------------------------------------------------------------------
