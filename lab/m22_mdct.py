@@ -41,9 +41,11 @@ from __future__ import annotations
 
 import argparse
 
+import functools
 import numpy as np
 
 
+@functools.lru_cache(maxsize=64)   # 2026-09-27: the window is a pure function of (n, alpha); np.i0 per frame was ~15 % of the AC-4 decode
 def kbd_window(n, alpha=4.0):
     """Kaiser-Bessel-derived window, the usual MDCT choice.
 
@@ -54,7 +56,9 @@ def kbd_window(n, alpha=4.0):
                                              / (n // 2) - 1.0) ** 2))
     c = np.cumsum(k)
     w = np.sqrt(c[:-1] / c[-1])
-    return np.concatenate([w, w[::-1]])
+    out = np.concatenate([w, w[::-1]])
+    out.flags.writeable = False     # cached: a caller that mutated it would poison every later frame
+    return out
 
 
 def sine_window(n):

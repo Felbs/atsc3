@@ -173,21 +173,40 @@ def _spectral_lib():
                     import ctypes
                     cand = ctypes.CDLL(path)
                     cand.spectral_kernel_abi.restype = ctypes.c_int32
-                    if int(cand.spectral_kernel_abi()) != 1:
+                    abi = int(cand.spectral_kernel_abi())
+                    if abi < 1:
                         raise OSError("ABI mismatch")
-                    i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
-                    i64 = np.ctypeslib.ndpointer(np.int64, flags="C")
-                    u8 = np.ctypeslib.ndpointer(np.uint8, flags="C")
+                    # raw pointers, not ndpointer: from_param's per-call checks
+                    # cost ~12 % of a 4-minute decode (782k calls); the three
+                    # call sites below make every array C-contiguous and of the
+                    # right dtype themselves and keep it alive for the call.
+                    i32 = i64 = u8 = ctypes.c_void_p
                     cand.asf_spectral_i32.restype = ctypes.c_int32
                     cand.asf_spectral_i32.argtypes = [
                         u8, ctypes.c_int64, i64, i32, ctypes.c_int32,
                         i32, ctypes.c_int32, i32, i32, i32, i32, i32,
                         i32, ctypes.c_int32]
+                    # ABI 2 (2026-09-27): the scale-factor / SNF group decoders
+                    if abi >= 2:
+                        cand.asf_sf_group_i32.restype = ctypes.c_int32
+                        cand.asf_sf_group_i32.argtypes = [
+                            u8, ctypes.c_int64, i64, i32, ctypes.c_int32,
+                            i32, ctypes.c_int32, i32, ctypes.c_int32,
+                            i32, ctypes.c_int32, ctypes.c_int32, i32, i32, i32]
+                        cand.asf_snf_group_i32.restype = ctypes.c_int32
+                        cand.asf_snf_group_i32.argtypes = [
+                            u8, ctypes.c_int64, i64, i32, ctypes.c_int32,
+                            i32, ctypes.c_int32, i32, ctypes.c_int32,
+                            i32, ctypes.c_int32, ctypes.c_int32, i32]
+                    cand._atsc3_abi = abi
                     lib = cand
                 except OSError:
                     lib = False
             _SPEC_STATE["lib"] = lib
         return lib or None
+
+
+_SPECTRAL_FALLBACKS = {}
 
 
 def _spectral_trees(tables):
@@ -258,12 +277,20 @@ def asf_spectral_data(b, sects, offsets, tables):
                                        .astype(np.int32).reshape(-1))
             offs = np.ascontiguousarray(np.asarray(offsets, np.int32))
             pos = np.array([b.p], np.int64)
-            rc = kern.asf_spectral_i32(buf, len(b.d), pos, sec, len(sects),
-                                       offs, len(offs), dims, mods, offs_cb,
-                                       tree, troot, lines, len(lines))
+            rc = kern.asf_spectral_i32(buf.ctypes.data, len(b.d), pos.ctypes.data,
+                                       sec.ctypes.data, len(sects),
+                                       offs.ctypes.data, len(offs), dims.ctypes.data,
+                                       mods.ctypes.data, offs_cb.ctypes.data,
+                                       tree.ctypes.data, troot.ctypes.data,
+                                       lines.ctypes.data, len(lines))
             if rc == 0:
                 b.p = int(pos[0])
                 return lines
+            if os.environ.get("ATSC3_SPECTRAL_DEBUG"):
+                _SPECTRAL_FALLBACKS[rc] = _SPECTRAL_FALLBACKS.get(rc, 0) + 1
+                if _SPECTRAL_FALLBACKS[rc] <= 3:
+                    print(f"  spectral kernel rc={rc} -> python fallback; "
+                          f"sects={sects[:6]} bitpos={b.p} len={len(b.d)}", flush=True)
             lines[:] = 0              # partial writes are discarded; the
             #                           Python loop re-runs from b.p unchanged
     for cb, s0, s1 in sects:
@@ -376,7 +403,84 @@ def sf_data(b, fr, T):
                 max_sfb=msfb[0], groups=G, framing=fr)
 
 
+_ONE_TREES = {}
+
+
+def _single_tree(hb):
+    """One codebook -> (flattened walk tree, root) for the ABI-2 group
+    decoders; same construction as _spectral_trees, cached by id(hb)."""
+    hit = _ONE_TREES.get(id(hb))
+    if hit is not None:
+        return hit[1]
+    m = getattr(hb, "map", None)
+    if not m:
+        return None
+    nodes = [[0, 0]]
+    ok = True
+    for (L, code), sym in m.items():
+        node = 0
+        for i in range(L):
+            bit = (code >> (L - 1 - i)) & 1
+            if i == L - 1:
+                if nodes[node][bit] != 0:
+                    ok = False
+                nodes[node][bit] = -(sym + 1)
+            else:
+                nxt = nodes[node][bit]
+                if nxt < 0:
+                    ok = False
+                    break
+                if nxt == 0:
+                    nodes.append([0, 0])
+                    nxt = len(nodes) - 1
+                    nodes[node][bit] = nxt
+                node = nxt
+    tree = (np.ascontiguousarray(np.array(nodes, np.int32).reshape(-1)), 0) if ok else None
+    _ONE_TREES[id(hb)] = (hb, tree)
+    return tree
+
+
+_NO_SF = np.int32(-2147483648)
+
+
+def _group_kernel(b, table):
+    """The ABI-2 kernel and this book's tree, or None -> Python path."""
+    kern = _spectral_lib()
+    if kern is None or getattr(kern, "_atsc3_abi", 1) < 2:
+        return None, None
+    if not isinstance(getattr(b, "d", None), (bytes, bytearray)):
+        return None, None
+    tree = _single_tree(table)
+    if tree is None:
+        return None, None
+    return kern, tree
+
+
 def _scalefac_group(b, sfb_cb, lines, offsets, sf_table, max_sfb, cur, first):
+    kern, tree = _group_kernel(b, sf_table)
+    if kern is not None and max_sfb > 0:
+        ln = np.ascontiguousarray(np.asarray(lines, np.int32))
+        out = np.empty(max_sfb, np.int32)
+        pos = np.array([b.p], np.int64)
+        st_cur = np.array([cur[0]], np.int32)
+        st_first = np.array([1 if first[0] else 0], np.int32)
+        buf = np.frombuffer(b.d, np.uint8)
+        cbs = np.ascontiguousarray(np.asarray(sfb_cb, np.int32))
+        ofs = np.ascontiguousarray(np.asarray(offsets, np.int32))
+        rc = kern.asf_sf_group_i32(
+            buf.ctypes.data, len(b.d), pos.ctypes.data,
+            cbs.ctypes.data, max_sfb, ln.ctypes.data, len(ln),
+            ofs.ctypes.data, len(ofs), tree[0].ctypes.data, tree[1],
+            SF_CENTRE, st_cur.ctypes.data, st_first.ctypes.data, out.ctypes.data)
+        if rc == 0:
+            b.p = int(pos[0])
+            cur[0] = int(st_cur[0])
+            first[0] = bool(st_first[0])
+            return [None if v == _NO_SF else int(v) for v in out]
+    return _scalefac_group_py(b, sfb_cb, lines, offsets, sf_table, max_sfb, cur, first)
+
+
+def _scalefac_group_py(b, sfb_cb, lines, offsets, sf_table, max_sfb, cur, first):
     """One group's slice of asf_scalefac_data.  `cur`/`first` are shared."""
     out = [None] * max_sfb
     for sfb in range(max_sfb):
@@ -390,6 +494,26 @@ def _scalefac_group(b, sfb_cb, lines, offsets, sf_table, max_sfb, cur, first):
 
 
 def _snf_group(b, sfb_cb, lines, offsets, snf_table, max_sfb):
+    kern, tree = _group_kernel(b, snf_table)
+    if kern is not None and max_sfb > 0:
+        ln = np.ascontiguousarray(np.asarray(lines, np.int32))
+        out = np.empty(max_sfb, np.int32)
+        pos = np.array([b.p], np.int64)
+        buf = np.frombuffer(b.d, np.uint8)
+        cbs = np.ascontiguousarray(np.asarray(sfb_cb, np.int32))
+        ofs = np.ascontiguousarray(np.asarray(offsets, np.int32))
+        rc = kern.asf_snf_group_i32(
+            buf.ctypes.data, len(b.d), pos.ctypes.data,
+            cbs.ctypes.data, max_sfb, ln.ctypes.data, len(ln),
+            ofs.ctypes.data, len(ofs), tree[0].ctypes.data, tree[1],
+            SNF_CENTRE, out.ctypes.data)
+        if rc == 0:
+            b.p = int(pos[0])
+            return [None if v == _NO_SF else int(v) for v in out]
+    return _snf_group_py(b, sfb_cb, lines, offsets, snf_table, max_sfb)
+
+
+def _snf_group_py(b, sfb_cb, lines, offsets, snf_table, max_sfb):
     out = [None] * max_sfb
     for sfb in range(max_sfb):
         if sfb_cb[sfb] == 0 or band_max(lines, offsets, sfb) == 0:

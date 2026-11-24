@@ -102,7 +102,7 @@ def smoke(path):
     import numpy as np
     dll = ctypes.CDLL(path)
     dll.spectral_kernel_abi.restype = ctypes.c_int32
-    if int(dll.spectral_kernel_abi()) != 1:
+    if int(dll.spectral_kernel_abi()) < 1:
         return "ABI mismatch"
     i32 = np.ctypeslib.ndpointer(np.int32, flags="C")
     i64 = np.ctypeslib.ndpointer(np.int64, flags="C")

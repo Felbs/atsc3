@@ -87,20 +87,28 @@ def packed_spectrum(ch, fr, rng=None):
     spec = np.zeros(total)
     lines = ch["lines"]
     sfs_all = ch.get("sfs_all") or [ch["sfs"]]
+    # 2026-09-27: one vectorised pass instead of a Python loop of tiny NumPy
+    # calls per band (~8 % of the whole decode). Same arithmetic per element
+    # -- sign(q)*|q|^(4/3) times the band's 2^(0.25*(sf-100)) -- so the
+    # result is bit-identical; bands with no scale factor stay zero.
+    gain = np.zeros(total)
     for g in range(fr.num_groups):
         sfs = sfs_all[g] if g < len(sfs_all) else None
         if sfs is None:
             continue
+        og = offs[g]
         for sfb in range(min(fr.max_sfb_g(g), len(sfs))):
             if sfs[sfb] is None:
                 continue
-            lo, hi = offs[g][sfb], offs[g][sfb + 1]
+            lo, hi = og[sfb], og[sfb + 1]
             hi = min(hi, len(lines), total)
-            if hi <= lo:
-                continue
-            q = lines[lo:hi].astype(float)
-            rec = np.sign(q) * np.abs(q) ** QUANT_EXP
-            spec[lo:hi] = rec * (2.0 ** (0.25 * (sfs[sfb] - SF_OFFSET)))
+            if hi > lo:
+                gain[lo:hi] = 2.0 ** (0.25 * (sfs[sfb] - SF_OFFSET))
+    n = min(len(lines), total)
+    if n > 0:
+        q = np.asarray(lines[:n], dtype=float)
+        rec = np.sign(q) * np.abs(q) ** QUANT_EXP
+        spec[:n] = rec * gain[:n]
     return spec
 
 
