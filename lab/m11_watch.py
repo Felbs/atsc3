@@ -280,6 +280,11 @@ class Watch:
         self.pipe = None
         self.frame_sec = FRAME_SEC
         self.blocks_per_frame = 74
+        # 2026-11-24: True when the sniff saw a bootstrap but L1 never
+        # verified -- the run then falls to m9_fast on a GUESS, and
+        # `resniff` asks main() to identify the multiplex again.
+        self.sniff_l1_failed = False
+        self.resniff = False
 
     def _min_blocks(self):
         """"Weak Frame" threshold, as a FRACTION of this multiplex.
@@ -768,6 +773,17 @@ class Watch:
                        f"re-acquiring ***")
                 self.bad_run = 0
                 self.fe.reacquire()
+                if (self.sniff_l1_failed and not self.resniff
+                        and self.n_conv == 0
+                        and self.fe.stats.get("reacquire", 0)
+                        >= self.RESNIFF_REACQ):
+                    ST.log(f"  *** m9_fast: {self.fe.stats['reacquire']} "
+                           f"re-acquisitions and not one FEC Block -- the "
+                           f"sniff's L1 never verified, so this may be an "
+                           f"LDM carrier on a weak start: identifying the "
+                           f"multiplex again ***")
+                    self.resniff = True
+                    self.stop.set()
         else:
             self.bad_run = 0
         # Same rule one stage down. This put had NO timeout at all, so a
@@ -892,6 +908,21 @@ class Watch:
 
     # -- E82: identify the multiplex before committing to a decoder -------
     SNIFF_SEC = 0.75
+    # 2026-11-24 (live RF25, Antenna A, rfgain 4): "L1 did not verify in 8
+    # Frames" -- but 0.75 s holds about THREE RF25 Frames (242.5 ms), and the
+    # step loop stops with less than 0.35 s left, so it was 2 tries, not 8.
+    # On a weak start that one-shot verdict sent the whole run down the
+    # m9_fast path, which cannot decode an LDM/CTI carrier: 0/77700 Blocks,
+    # 131 re-acquisitions, no picture, no sound.  When a bootstrap WAS seen
+    # (so there is an ATSC 3.0 signal here) but L1 failed, read more air and
+    # ask again, up to SNIFF_ROUNDS times.  A multiplex whose L1 verifies at
+    # once (RF33) pays nothing; a band with no bootstrap pays nothing.
+    SNIFF_MORE_SEC = 1.5
+    SNIFF_ROUNDS = int(os.environ.get("ATSC3_SNIFF_ROUNDS", "4"))
+    # ...and if every round fails, main() re-identifies after this many
+    # re-acquisitions of the m9_fast path with no FEC Block converged.
+    RESNIFF_REACQ = 4
+    RESNIFF_MAX = 6
 
     def _sniff(self):
         """Read a little air, ask L1 what this is, and hand the samples back.
@@ -903,43 +934,76 @@ class Watch:
         that follows is the one that has always run.
         """
         import m44_ldm as M44
-        blocks, total = [], 0
-        need = int(self.SNIFF_SEC * self.rate)
-        t0 = time.time()
+        blocks = []
         self.src.start()
-        while total < need and time.time() - t0 < 30:
-            x = self.src.read()
-            if x is None:
+
+        def read_air(secs, resume=False):
+            if resume and hasattr(self.src, "pause"):
+                self.src.start()    # a radio paused while L1 was being tried
+                blocks.append(b"BREAK")     # ...so the air in between is gone
+            got, chunk = 0, []
+            need = int(secs * self.rate)
+            t0 = time.time()
+            while got < need and time.time() - t0 < 30:
+                x = self.src.read()
+                if x is None:
+                    break
+                # A continuity BREAK is KEPT, not swallowed.  It is replayed
+                # into the front end with the samples so the bootstrap
+                # tracker learns about it; dropping it here would splice two
+                # discontinuous stretches into one apparently-continuous
+                # stream, which is exactly what t0 tracking cannot survive.
+                chunk.append(x)
+                if isinstance(x, bytes):
+                    continue
+                got += len(x)
+            blocks.extend(chunk)
+            return chunk
+
+        def identify(chunk):
+            if hasattr(self.src, "pause"):
+                # E109: nobody drains the radio while L1 is tried (seconds,
+                # on a weak start); pausing beats a buffer of overflows
+                self.src.pause()
+            samples = [b for b in chunk if not isinstance(b, bytes)]
+            if not samples:
+                return None, dict(why="no samples")
+            # identify on the LAST unbroken stretch, so a break inside the
+            # sniff window cannot fabricate a multiplex out of two halves
+            last = []
+            for b in chunk:
+                if isinstance(b, bytes):
+                    last = []
+                else:
+                    last.append(b)
+            return M44.sniff(np.concatenate(last or samples), self.rate,
+                             log=ST.log)
+
+        plan, info = identify(read_air(self.SNIFF_SEC))
+        rounds = 1
+        while (plan is None and rounds < self.SNIFF_ROUNDS
+               and str(info.get("why", "")).startswith("L1 did not verify")):
+            ST.log(f"  multiplex sniff: bootstrap seen but {info['why']} "
+                   f"(round {rounds}/{self.SNIFF_ROUNDS}) -- reading "
+                   f"{self.SNIFF_MORE_SEC:g} s more air and asking again")
+            chunk = read_air(self.SNIFF_MORE_SEC, resume=True)
+            if not chunk:
                 break
-            # A continuity BREAK is KEPT, not swallowed.  It is replayed into
-            # the front end with the samples so the bootstrap tracker learns
-            # about it; dropping it here would splice two discontinuous
-            # stretches into one apparently-continuous stream, which is
-            # exactly what t0 tracking cannot survive.
-            blocks.append(x)
-            if isinstance(x, bytes):
-                continue
-            total += len(x)
+            plan, info = identify(chunk)
+            rounds += 1
         if hasattr(self.src, "pause"):
             # E109: the decode pool warms next; the radio must not stream
             # into a buffer nobody drains (the reader resumes it)
             self.src.pause()
-        samples = [b for b in blocks if not isinstance(b, bytes)]
-        if not samples:
-            return blocks
-        # identify on the LAST unbroken stretch, so a break inside the sniff
-        # window cannot fabricate a multiplex out of two halves
-        last = []
-        for b in blocks:
-            if isinstance(b, bytes):
-                last = []
-            else:
-                last.append(b)
-        plan, info = M44.sniff(np.concatenate(last or samples), self.rate,
-                               log=ST.log)
         if plan is None:
+            self.sniff_l1_failed = str(info.get("why", "")).startswith(
+                "L1 did not verify")
             ST.log(f"  multiplex sniff: {info.get('why', 'unidentified')} "
-                   f"-- taking the m9_fast (RF33-shaped) path")
+                   f"after {rounds} round(s) -- taking the m9_fast "
+                   f"(RF33-shaped) path"
+                   + (f"; will identify again after "
+                      f"{self.RESNIFF_REACQ} fruitless re-acquisitions"
+                      if self.sniff_l1_failed else ""))
             return blocks
         ST.log("  multiplex sniff (from L1, not from the channel number) --\n"
                "    " + plan.describe())
@@ -1858,26 +1922,53 @@ def main(argv=None):
 
     ST.log(f"ATSC 3.0 live -- RF{a.rf}, accel={a.accel}, "
            f"{'replay ' + os.path.basename(a.capture) if a.capture else 'RADIO'}")
-    w = Watch(a)
-    if w.lossless:
-        ST.log("  replay is LOSSLESS (backpressure, no frame shedding); "
-               "--shed or --realtime restores live behaviour")
+    t_main = time.time()
+    secs0 = a.secs
+    resniffs = 0
+    user_stop = threading.Event()
+    while True:
+        w = Watch(a)
+        if w.lossless:
+            ST.log("  replay is LOSSLESS (backpressure, no frame shedding); "
+                   "--shed or --realtime restores live behaviour")
 
-    def onsig(*_):
-        w.stop.set()
-    try:
-        signal.signal(signal.SIGINT, onsig)
-        signal.signal(signal.SIGTERM, onsig)
-    except Exception:                                          # noqa: BLE001
-        pass
-
-    try:
-        s = w.run()
-    finally:
+        def onsig(*_, w=w):
+            user_stop.set()
+            w.stop.set()
         try:
-            w.src.close()
+            signal.signal(signal.SIGINT, onsig)
+            signal.signal(signal.SIGTERM, onsig)
         except Exception:                                      # noqa: BLE001
             pass
+
+        try:
+            s = w.run()
+        finally:
+            try:
+                w.src.close()
+            except Exception:                                  # noqa: BLE001
+                pass
+        # 2026-11-24: the sniff's L1 never verified and m9_fast decoded
+        # nothing -- identify again (a fresh radio open, a fresh sniff)
+        # instead of spending the rest of the run on the wrong decoder.  A
+        # replay restarts from the next stretch of the file (--start), a
+        # radio from the air now.
+        if (not w.resniff or user_stop.is_set() or s.get("error")
+                or resniffs >= Watch.RESNIFF_MAX):
+            break
+        resniffs += 1
+        used = time.time() - t_main
+        if secs0:
+            if used >= secs0 - 5:
+                break
+            a.secs = secs0 - used
+        if a.capture:
+            a.start = (a.start or 0.0) + s.get("air_s", 0.0) + 1.0
+        ST.log(f"  === re-identifying the multiplex (attempt {resniffs}/"
+               f"{Watch.RESNIFF_MAX}, {used:.0f} s into the run"
+               + (f", replay from {a.start:.1f} s" if a.capture else "")
+               + ") ===")
+    s["resniffs"] = resniffs
 
     print("\n  === RUN SUMMARY ===")
     print(f"    air decoded        {s['air_s']:9.3f} s over "
