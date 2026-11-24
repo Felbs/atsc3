@@ -836,7 +836,16 @@ Q8_ITERS = int(os.environ.get("ATSC3_LDPC_Q8_ITERS", "16"))
 #: E131: the sixteen-lane int16 kernel WITH the two-minimum correction, half
 #: the float32 footprint.  "0" off; "1" alone; "hybrid" = int16 first, float32
 #: on what it left.  The batch's mean |LLR| is placed at Q16_MEAN units.
-Q16_DEFAULT = os.environ.get("ATSC3_LDPC_Q16", "1")
+#: 2026-11-24: default "hybrid" (was "1").  On the RF25 bank the soak ran
+#: from (rf25_antA_45s, 11-07) int16 alone lost one Block the float32 kernel
+#: of the 13.25 soak converged (6401/6402 vs 6402/6402, 4 audio frames
+#: padded on the English programme); hybrid gets it back, and on the
+#: marginal Antenna B bank converges 4694/6337 against int16's 4671 and the
+#: soak's 4655.  The float32 pass runs only on Blocks int16 left, and only
+#: when the batch converged at least one Block (Q16_HYBRID_MIN_CONV): on dead
+#: air it would cost 16 % of the chain for nothing (1.51x -> 1.26x measured).
+Q16_DEFAULT = os.environ.get("ATSC3_LDPC_Q16", "hybrid")
+Q16_HYBRID_MIN_CONV = int(os.environ.get("ATSC3_LDPC_Q16_HYBRID_MIN_CONV", "1"))
 Q16_LANES = 16
 Q16_MEAN = float(os.environ.get("ATSC3_LDPC_Q16_MEAN", "1024"))
 #: E136: which int16 kernel.  "dense" = E131 with the faster load and syndrome (messages
@@ -897,7 +906,8 @@ def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=N
         if any(rc != 0 for rc in rcs):
             return None
         left = np.flatnonzero(conv == 0)
-        if q16 != "hybrid" or len(left) == 0:
+        if (q16 != "hybrid" or len(left) == 0
+                or int(np.count_nonzero(conv)) < Q16_HYBRID_MIN_CONV):
             return bits, conv.view(bool), its, bad
         sub = np.ascontiguousarray(llr[left])
         b2 = np.empty((len(left), n), np.uint8)
