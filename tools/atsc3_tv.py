@@ -1515,6 +1515,11 @@ def spawn_mpv_pipe(title, extra=()):
     logf = os.environ.get("ATSC3_MPV_LOG")
     if logf:
         cmd.append(f"--log-file={logf}")
+    # 2026-09-27 (d6b0b9c, restored 2026-11-24): ATSC3_MPV_EXTRA="<mpv args>"
+    # -- player-side levers for a box where software HEVC is ~50 % of a core
+    # (measured on a 2-core laptop); whitespace-split, appended after ours.
+    # atsc3_watch_av sets a lean default on small boxes.
+    cmd += os.environ.get("ATSC3_MPV_EXTRA", "").split()
     cmd += list(extra) + ["-"]
     return subprocess.Popen(
         cmd, stdin=subprocess.PIPE, env=display_env(),
