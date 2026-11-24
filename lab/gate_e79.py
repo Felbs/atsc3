@@ -198,6 +198,11 @@ def gate_unmeasured():
           g30["measured"] is False
           and g30["source"] == "default-known-carrier"
           and "not recorded" in CG.describe(30), CG.describe(30))
+    g8 = CG.lookup(8)
+    check("RF8 (4 failed, 2 decoded L1) -> provisional 2, still unmeasured",
+          g8["rfgain_sel"] == 2 and g8["measured"] is False
+          and g8["source"] == "provisional"
+          and "PROVISIONAL" in CG.describe(8), CG.describe(8))
     check("a measured carrier reports its provenance",
           "measured" in CG.describe(33) and "E73" in CG.describe(33))
 

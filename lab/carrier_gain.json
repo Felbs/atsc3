@@ -32,6 +32,7 @@
   "carriers": {
     "8": {
       "rfgain_sel": null,
+      "provisional_rfgain_sel": 2,
       "ifgr": 32,
       "measured": false,
       "measured_utc": "2026-08-11T17:10",
@@ -57,6 +58,12 @@
         "hand RF8 the one setting we have evidence against, and the",
         "failure would look like 'RF8 is undecodable' rather than 'we",
         "tuned it wrong'. Any RF8 work must pass an EXPLICIT gain.",
+        "2026-11-24: provisional_rfgain_sel 2 added so that a run that",
+        "passes NO gain gets the one value with evidence FOR it (L1",
+        "decoded at 2; 4 and 0 failed) instead of the UHF default 4.",
+        "Still measured:false and logged as PROVISIONAL; rfgain_sel stays",
+        "null until an interleaved 2/4/2/4 sweep earns a real value.",
+        "(Live 2026-11-24, Antenna A: no bootstrap at either 2 or 4.)",
         "",
         "This also bounds the default's own justification. 'A wrong 4",
         "costs margin; a wrong 2 can cost the whole carrier' was induced",

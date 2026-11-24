@@ -82,6 +82,13 @@ def lookup(rf, table=None):
                     ifgr=int(ent.get("ifgr", dflt["ifgr"])),
                     measured=bool(ent.get("measured")),
                     source="table", entry=ent)
+    if ent and ent.get("provisional_rfgain_sel") is not None:
+        # Not measured, but the carrier's own evidence says the global
+        # default is the WRONG guess here (RF8: 4 failed, 2 decoded L1).
+        # Still reported unmeasured, so the log says so out loud.
+        return dict(rfgain_sel=int(ent["provisional_rfgain_sel"]),
+                    ifgr=int(ent.get("ifgr", dflt["ifgr"])),
+                    measured=False, source="provisional", entry=ent)
     return dict(rfgain_sel=int(dflt["rfgain_sel"]),
                 ifgr=int(dflt.get("ifgr", 32)),
                 measured=False,
@@ -108,6 +115,9 @@ def describe(rf, table=None):
     why = "never measured"
     if g["source"] == "default-known-carrier":
         why = "decoded once but the gain was not recorded"
+    elif g["source"] == "provisional":
+        why = ("PROVISIONAL, from this carrier's own evidence (the global "
+               "default failed here)")
     return (f"RF{rf}: rfgain_sel={g['rfgain_sel']} IFGR={g['ifgr']} "
             f"** DEFAULT, {why} -- run calibration **")
 
