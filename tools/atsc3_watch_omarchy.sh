@@ -23,6 +23,7 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PY=${PY:-$HOME/Projects/.venv/bin/python}   # the shared venv (Arch blocks system pip); override with PY=
 D=$HOME/atsc3_live_rf$RF
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1   # the AC-4 QMF loop thrashes a threaded BLAS (E56)
+export ATSC3_ALC=${ATSC3_ALC:-1}   # level control on for watching (lab/m46_alc.py); 0 = decoder's own level
 # This box has no meteor-capture job (Felbs, 2026-11-02): never reserve the radio 02:10-05:40.
 # Set ATSC3_METEOR_WINDOW=HH:MM-HH:MM in the environment to bring a window back.
 export ATSC3_METEOR_WINDOW=${ATSC3_METEOR_WINDOW:-off}

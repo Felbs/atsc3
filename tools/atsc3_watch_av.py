@@ -291,6 +291,11 @@ def main():
                          "tuning experiments' hook")
     ap.add_argument("--python", default=None)
     a = ap.parse_args()
+    # Level control ON for watching (lab/m46_alc.py): services sit up to
+    # ~20 dB apart and every channel change jumped by that much. The audio
+    # workers inherit it; ATSC3_ALC=0 in the environment keeps the
+    # decoder's own level (the worker's default, for gates and renders).
+    os.environ.setdefault("ATSC3_ALC", "1")
 
     py = find_python(a.python)
     if py is None:

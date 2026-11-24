@@ -530,6 +530,15 @@ def main():
                          "line or end of input = not needed, exit 0). The "
                          "orchestrator starts its workers this way while the "
                          "chain is still tuning")
+    ap.add_argument("--alc", choices=("on", "off"), default=None,
+                    help="automatic level control (lab/m46_alc.py): BS.1770 "
+                         "loudness of the decoded sound steered to "
+                         "--alc-target, peak-limited. Default: $ATSC3_ALC "
+                         "(1 = on), else off -- off writes the same bytes "
+                         "as before")
+    ap.add_argument("--alc-target", type=float, default=None,
+                    help="ALC target loudness, LUFS (default "
+                         "$ATSC3_ALC_TARGET or -24)")
     a = ap.parse_args()
     if a.standby:
         # A worker started when its lane appears spends 1.4 s getting ready
@@ -577,6 +586,7 @@ def main():
     import m38_resample as RS                                   # noqa: E402
     import m30_filterbank as FB                                 # noqa: E402
     from m42_ac4_stream import Ac4Stream                        # noqa: E402
+    from m46_alc import Alc                                     # noqa: E402
 
     idx_path = os.path.splitext(src)[0] + ".idx"
     # RESUME. A worker that always starts at cursor 0 re-decodes the whole
@@ -597,6 +607,7 @@ def main():
         pass
     resume_n = 0
     ref_resume = 0.0
+    alc_resume = None
     try:
         stv = json.load(open(state_p))
         _ch_ok = False
@@ -625,6 +636,7 @@ def main():
             # (6 s) late, which would have offset the whole muxed programme.
             resume_first = stv.get("first_seq")
             ref_resume = float(stv.get("ref_peak") or 0.0)
+            alc_resume = stv.get("alc")
             print(f"  resuming: {resume_n/OUT_FS:.1f} s already written, "
                   f"lane frame {stv['cursor']} (re-running {resume_skip} "
                   f"frames to settle state)")
@@ -696,6 +708,18 @@ def main():
         print("  decoder: python (m42), as asked", flush=True)
     dec = libdec if libdec is not None else Ac4Stream(element=a.element)
     wav = WavAppender(out, ch=a.channels, resume=resume_n)
+    # LEVEL CONTROL (lab/m46_alc.py), after the decoder and the resampler,
+    # on the PCM about to be written: one gain for every channel, steered
+    # to a BS.1770 target, peak-limited without lookahead. Off (the default
+    # outside the live launchers) = not constructed = the bytes as before.
+    alc = None
+    if (a.alc == "on") or (a.alc is None and Alc.enabled_from_env()):
+        alc = Alc.from_env(len(out_chans), target=a.alc_target)
+        if alc_resume:
+            alc.restore(alc_resume)
+        print(f"  level control: ALC on, {alc.describe()}"
+              + (f", resumed at {alc.gain_db:+.1f} dB" if alc_resume else ""),
+              flush=True)
     LEAD = 4                        # frames of QMF lead-in, discarded
     MAX_PASS = max(8, a.max_pass)   # 60 s of audio; caps peak RSS
     # ONE LEVEL FOR THE WHOLE STREAM.
@@ -848,6 +872,8 @@ def main():
                                               else np.zeros(n_t)
                                               for k in out_chans])
                         yt = rs_stream.push(yt * (0.9 / ref_peak))
+                        if alc is not None:
+                            yt = alc.process(yt)
                         wav.append(yt)
                         total_media += len(yt) / OUT_FS
                     libdec.reset(0)     # new file, new stream, frame 0
@@ -1056,6 +1082,8 @@ def main():
                               f"here on", flush=True)
                         ref_peak = pk
                     y = rs_stream.push(y * (0.9 / ref_peak))
+                    if alc is not None:
+                        y = alc.process(y)
                     wav.append(y)
                     total_media += len(y) / OUT_FS
                 # Record WHICH MPU SLOT sample 0 of this wav belongs to.
@@ -1090,11 +1118,13 @@ def main():
                 # are not in the wav, and a resume must decode them again)
                 cur_saved = (cursor if libdec is None or libdec.fresh()
                              else libdec.out_frame)
-                json.dump(dict(lane=os.path.abspath(src), cursor=cur_saved,
-                               pad_done=pad_done, wav_samples=wav.n,
-                               first_seq=first_slot, generation=gen_seen,
-                               ref_peak=ref_peak),
-                          open(state_p, "w"))
+                st_out = dict(lane=os.path.abspath(src), cursor=cur_saved,
+                              pad_done=pad_done, wav_samples=wav.n,
+                              first_seq=first_slot, generation=gen_seen,
+                              ref_peak=ref_peak)
+                if alc is not None:
+                    st_out["alc"] = alc.state()
+                json.dump(st_out, open(state_p, "w"))
             except OSError:
                 pass
             dt_ = time.time() - t_pass
@@ -1110,7 +1140,8 @@ def main():
                   f"hf_fail {self_hf_fail}, burst {n_burst}, "
                   f"pass {dt_:.1f} s"
                   + (f", {total_media/total_wall:.2f}x real time"
-                     if total_wall > 0 else ""))
+                     if total_wall > 0 else "")
+                  + (f", {alc.status()}" if alc is not None else ""))
             # E61: ROLL before the 32-bit wall. Close first (we hold the
             # handle), archive wav+state+sidecar together, then exit with
             # the roll code -- the warden respawns us and the fresh start
@@ -1149,6 +1180,9 @@ def main():
         print("  stopped")
     finally:
         wav.close()
+        if alc is not None:
+            alc.close()
+            print(f"  level control: {alc.status()}")
         if libdec is not None:
             st = libdec.stats()
             rs = libdec.reasons()

@@ -22,6 +22,9 @@ mkdir -p "$D"
 # nowhere). Single-threaded BLAS: 9.56x. The python-level channel
 # threading is unaffected -- it is the BLAS pool that must not fan out.
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+# level control on for watching (lab/m46_alc.py); ATSC3_ALC=0 keeps the
+# decoder's own level
+export ATSC3_ALC=${ATSC3_ALC:-1}
 # one-each: refuse to double-start any stage (bracket patterns so this
 # script's own argv can never self-match -- the pgrep trap)
 for pat in 'atsc3_audio[.]py' 'atsc3_subs[.]py' 'atsc3_tv[.]py' \

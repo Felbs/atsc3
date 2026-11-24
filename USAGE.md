@@ -64,6 +64,34 @@ lines of the audio log say which one is running. `ATSC3_AC4_BACKEND=python`
 forces the old decoder. Stereo from a 5.1 programme is a proper downmix with
 the centre (dialogue) and surrounds folded in.
 
+**Level control (ALC).** Services differ a lot in level (one broadcaster's
+stereo decodes ~17 dB under its own loudness metadata), so changing service
+used to jump. The audio worker can level what it decodes: it measures the
+loudness of the decoded sound as ITU-R BS.1770 / EBU R128 do (K-weighted,
+gated: silence and speech pauses do not count), steers one gain for all
+channels toward a target, and limits peaks so a boost never clips. It
+settles in 1-3 s after a service starts, then rides slowly (a step in the
+programme's level is followed at up to 2 dB/s down, 1 dB/s up). The limiter
+has no lookahead, so nothing is delayed. `lab/m46_alc.py` has the details;
+`python lab/gate_alc.py` checks it.
+
+The live launchers (`tools/atsc3_watch_av.py`, `tools/atsc3_watch_omarchy.sh`,
+`tools/atsc3_tv_linux.sh`) turn it **on**; a worker started by hand leaves it
+off unless asked (its output is then byte-identical to before), so gates and
+recordings rendered offline keep the decoder's own level.
+
+| setting | what it does |
+|---|---|
+| `ATSC3_ALC=1` / `0` (worker: `--alc on\|off`) | level control on / off |
+| `ATSC3_ALC_TARGET=-24` (worker: `--alc-target`) | target loudness, LUFS (ATSC A/85 says -24) |
+| `ATSC3_ALC_MAX_BOOST=20`, `ATSC3_ALC_MAX_CUT=20` | the most it turns up / down, dB |
+| `ATSC3_ALC_CEILING=-1` | limiter ceiling, dBFS |
+| `ATSC3_ALC_TAU=15` | how many seconds of programme the slow level estimate averages |
+| `ATSC3_ALC_TRACE=FILE` | one line per 100 ms: time, block loudness, level, gain, limiter |
+
+The audio log's progress lines end with the gain in use, e.g.
+`alc +17.9 dB (in -41.9 LUFS)`.
+
 ---
 
 ## 3. Turn captions on and off
