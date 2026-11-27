@@ -1161,8 +1161,20 @@ class Watch:
             if getattr(a, "plp1", False) and getattr(self, "m9_plan", None) is not None:
                 import m17_plp1_live as M17
                 spec = self.m9_plan.to_spec()
+                # PLP 1's 64800-bit LDPC never runs on the GPU, so on a GPU
+                # accel it used to borrow the GPU decoder's cpu_fast=False
+                # settings: the exact float64 NumPy min-sum, not the compiled
+                # layered kernel.  Measured on a 40 s replay (first 80 Frames):
+                # 0.016x -> 0.44x real time, PLP0 5920/5920 both ways, PLP1
+                # 9062 -> 9105 of 9360.  ATSC3_SF1_FAST=0 restores the old path.
+                fd1 = self.fd
+                if a.accel != "cpu" and os.environ.get("ATSC3_SF1_FAST", "1") != "0":
+                    fd1 = m9_fast.FrameDecoder(threads=a.threads, backend="cpu",
+                                               iters=a.iters, cpu_fast=True,
+                                               plan=self.m9_plan)
+                    fd1.prewarm()
                 self.sf1 = M17.SubframeDecoder(
-                    self.fd, self.m9_plan.g, spec["l1b"],
+                    fd1, self.m9_plan.g, spec["l1b"],
                     [tuple(f) for f in spec["fields"]], 1,
                     plp_id=getattr(a, "plp1_id", None),
                     comb=not getattr(a, "no_plp1_comb", False))
