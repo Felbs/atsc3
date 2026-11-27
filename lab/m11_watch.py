@@ -1920,10 +1920,16 @@ def main(argv=None):
         # Only the values the user did not set are touched.
         def given(opt):            # "--opt N" and "--opt=N" both count as set
             return any(x == opt or x.startswith(opt + "=") for x in sys.argv)
+        # E142 (2026-11-27, 12 logical cores, 40 s service-1 replay at
+        # 6.912 Msps, --realtime --shed, PLP1 256QAM 11/15, 117 Blocks a
+        # Frame): Frames kept of 164 -- 5 x 2: 131, 6 x 2: 133, 7 x 1: 150,
+        # 8 x 1: 151, 9 x 1: 145, 10 x 1: 146, 11 x 1: 143.  One thread a
+        # process wins once the PLP1 Subframe is the load; 7 leaves the
+        # reader, front end and player their cores.
         if not given("--decode-procs"):
-            a.decode_procs = max(2, ncpu // 2 - 1)
+            a.decode_procs = max(2, (ncpu * 7) // 12)
         if not given("--threads"):
-            a.threads = 2
+            a.threads = 1
     if a.fe_threads is None:
         a.fe_threads = 16 if ncpu >= 8 else max(1, ncpu)
     if a.capture is None and in_meteor_window() and not a.force_meteor:
