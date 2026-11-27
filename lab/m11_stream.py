@@ -1439,6 +1439,23 @@ class FineTrack:
         # A track without a coordinate system is a random walk with
         # confidence.
         t0_abs = abs_off + t0
+        if abs(t0 - centre) >= FT_SPAN:
+            # The peak sits on the edge of the +-FT_SPAN search: the true
+            # start lies beyond it and this t0 is CLIPPED, not measured.  A
+            # rate built on clipped t0s is wrong, and the old code kept it:
+            # one bad early rate (d = +16 samples a Frame on a clock that was
+            # not drifting) slid the cursor 16 samples a Frame ahead while
+            # every rescan, pinned to the edge, only shrank d by an EMA step --
+            # coherence fell 0.996 -> 0.956 and PLP0 went 74 -> 0/74 within
+            # ten Frames until the bad-run re-acquire.  Forget the rate:
+            # d = None puts search() on the full scan every Frame (the exact
+            # path's behaviour) until two clean scans measure it again.
+            self.stats["edge_reanchor"] += 1
+            self.d = None
+            self.frac = 0.0
+            self.anchor_t0 = None
+            self.anchor_n = 0
+            return t0, coh
         # E55: snapshot -- reset() runs on the DECODE thread (via
         # reacquire()) and rebinds anchor_t0 to None; same race class as
         # the de-rotation ramp that killed live1b.

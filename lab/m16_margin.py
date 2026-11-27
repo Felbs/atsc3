@@ -527,7 +527,8 @@ def comb_denoise_grid(Hg, dx, nfft, min_period=0, floor_margin=4.0,
     # column or one for all) skips the first transform; a hint that has gone
     # stale -- the strongest tap no longer near zero after the rotation -- is
     # discarded and measured afresh.
-    if tau0 is None:
+    hinted = tau0 is not None
+    if not hinted:
         tau0 = delays[np.argmax(np.abs(transform(Hg)) ** 2, axis=1)]
     else:
         tau0 = np.broadcast_to(np.asarray(tau0, int), (nsym,)).copy()
@@ -538,8 +539,11 @@ def comb_denoise_grid(Hg, dx, nfft, min_period=0, floor_margin=4.0,
     twist = np.stack([rots[int(t)] for t in tau0], axis=0)        # (nsym, ngrid)
     Tw = transform((Hg.T * twist).T)
     pw = np.abs(Tw) ** 2
-    if np.any(np.abs(delays[np.argmax(pw, axis=1)]) > W // 8):
-        # the hint was wrong: measure the delays and do it properly
+    if hinted and np.any(np.abs(delays[np.argmax(pw, axis=1)]) > W // 8):
+        # the hint was wrong: measure the delays and do it properly.  Only a
+        # HINT is retried: on measured delays a noise-only column can still
+        # peak far from zero after the rotation, and retrying that recursed
+        # without end (RecursionError in a live --plp1 decode worker).
         return comb_denoise_grid(Hg, dx, nfft, min_period, floor_margin, dyn_range_db,
                                  energy_min, dilate, tau0=None, return_tau0=return_tau0)
     pmax = pw.max(axis=1)
