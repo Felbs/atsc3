@@ -130,6 +130,18 @@ class SubframeDecoder:
         self.plp = plps[plp_id if plp_id is not None else sorted(plps)[0]]
         p = self.plp
         self.ch = B.PlpChain(p["ninner"], p["mod"], p["rate"], iters=fd.iters)
+        # E141: the ladder and the int16 mode for THIS code, measured.  On
+        # 1,521 banked failing 256QAM 11/15 Blocks (a weak 40 s service-1
+        # replay), the default (1.0, 0.85, 0.75) with the int16 -> float32
+        # hybrid converged 423 in 8.4 s: alpha 1.0 rescued 145, 0.85 254,
+        # 0.75 24 for 5.0 s, and the float32 pass rescued none.  (0.8, 0.9),
+        # int16 only: 429 in 2.8 s.  Only this code; ATSC3_LDPC_LADDER (any
+        # code) or ATSC3_SF1_LDPC=default keeps the old behaviour.
+        if (p["ninner"] == 64800 and str(p["mod"]) == "256QAM" and str(p["rate"]) == "11/15"
+                and not os.environ.get("ATSC3_LDPC_LADDER")
+                and os.environ.get("ATSC3_SF1_LDPC", "") != "default"):
+            self.ch.ALPHA_LADDER = (0.8, 0.9)
+            self.ch.q16 = "1"
         self.pts = B.points_for(p["mod"], p["rate"])
         self.ones = B.bit_masks(BI.MOD_BITS[p["mod"]])
         self.comb = bool(comb)

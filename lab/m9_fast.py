@@ -1392,7 +1392,7 @@ class FrameDecoder:
                 break
             sub = lam2d
             if len(todo) != nb:
-                sub = (lam2d[list(map(int, todo))] if hasattr(lam2d, "device")
+                sub = (lam2d[list(map(int, todo))] if not isinstance(lam2d, np.ndarray)
                        else lam2d[todo])
             if gpu is not None:
                 with self._lock:
@@ -1410,7 +1410,7 @@ class FrameDecoder:
         # E133: bank every batch that left a Block unconverged (LLRs + verdicts),
         # for the offline near-miss study.  Off unless ATSC3_LDPC_DUMP_FAIL names a dir.
         _dd = os.environ.get("ATSC3_LDPC_DUMP_FAIL")
-        if _dd and not conv.all() and not hasattr(lam2d, "device"):
+        if _dd and not conv.all() and isinstance(lam2d, np.ndarray):
             try:
                 os.makedirs(_dd, exist_ok=True)
                 _k = getattr(self, "_dump_fail_n", 0)
@@ -1452,7 +1452,8 @@ class FrameDecoder:
         if self.cpu_fast and getattr(self, "ldpc_layered", LD.LAYERED_DEFAULT):
             r = LD.layered_decode_batch(lam2d, chain.checks, chain.ninner,
                                         iters=self.iters, alpha=alpha, ex=self.ex,
-                                        corr=getattr(self, "ldpc_boxplus", None), abort=getattr(self, "ldpc_abort", None))
+                                        corr=getattr(self, "ldpc_boxplus", None), abort=getattr(self, "ldpc_abort", None),
+                                        q16=getattr(chain, "q16", None))
             if r is not None:
                 return r
         nch = 1 if self.ex is None else max(1, min(nb, self.threads))

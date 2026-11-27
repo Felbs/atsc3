@@ -858,7 +858,7 @@ Q16_MEAN = float(os.environ.get("ATSC3_LDPC_Q16_MEAN", "1024"))
 Q16_KERNEL = os.environ.get("ATSC3_LDPC_Q16_KERNEL", "packed")
 
 
-def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=None, abort=None, pack=None):
+def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=None, abort=None, pack=None, q16=None):
     """E107: (nblk, n) float32 LLRs -> (bits2d, conv, its, bad), the batch
     decoder's shape, eight blocks per kernel call, calls spread over `ex`.
     Returns None when the kernel cannot serve the call (caller falls back)."""
@@ -883,7 +883,7 @@ def layered_decode_batch(lam2d, checks, n, iters=50, alpha=0.75, ex=None, corr=N
     ak, ast = int(ak), int(ast)
     at = int(round(at * nc)) if 0 < at < 1 else int(at)   # T < 1: a fraction of the checks
 
-    q16 = Q16_DEFAULT if getattr(lib, "has_q16", False) else "0"
+    q16 = (Q16_DEFAULT if q16 is None else str(q16)) if getattr(lib, "has_q16", False) else "0"
     if q16 != "0":
         mean = float(np.mean(np.abs(llr))) if llr.size else 1.0
         scale16 = np.float32(Q16_MEAN / mean) if mean > 0 else np.float32(1.0)
