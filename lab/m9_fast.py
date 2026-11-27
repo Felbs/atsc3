@@ -1452,7 +1452,7 @@ class FrameDecoder:
         if self.cpu_fast and getattr(self, "ldpc_layered", LD.LAYERED_DEFAULT):
             r = LD.layered_decode_batch(lam2d, chain.checks, chain.ninner,
                                         iters=self.iters, alpha=alpha, ex=self.ex,
-                                        corr=getattr(self, "ldpc_boxplus", None), abort=getattr(self, "ldpc_abort", None),
+                                        corr=getattr(self, "ldpc_boxplus", None), abort=getattr(chain, "abort", None) or getattr(self, "ldpc_abort", None),
                                         q16=getattr(chain, "q16", None))
             if r is not None:
                 return r

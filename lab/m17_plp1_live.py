@@ -142,6 +142,10 @@ class SubframeDecoder:
                 and os.environ.get("ATSC3_SF1_LDPC", "") != "default"):
             self.ch.ALPHA_LADDER = (0.8, 0.9)
             self.ch.q16 = "1"
+            # E143: give a hopeless Block up at sweep 5, not 8 (same 0.36 of
+            # the checks): on the E141 bank, 429 converged either way, 6% less
+            # LDPC time.
+            self.ch.abort = (5, 0.36, 0)
         self.pts = B.points_for(p["mod"], p["rate"])
         self.ones = B.bit_masks(BI.MOD_BITS[p["mod"]])
         self.comb = bool(comb)
@@ -347,8 +351,15 @@ class SubframeDecoder:
                 df = float(np.angle(acc)) / (2.0 * np.pi * self.dy * tsym)
         applied = 0.0
         if self.track_cfo and abs(df) > CFO_REDO_HZ:
-            n_ = np.arange(span, dtype=np.float64)
-            seg = seg * np.exp(-2j * np.pi * df * n_ / M13.FS_POST)
+            # exp(k(qB + r)) = exp(kqB) exp(kr): two short exp tables and one
+            # outer product instead of `span` complex exps (25 -> 4 ms, the
+            # same rotation to ~4e-16 relative).
+            kk = -2j * np.pi * df / M13.FS_POST
+            B = 4096
+            nbk = -(-span // B)
+            rot = (np.exp(kk * B * np.arange(nbk))[:, None]
+                   * np.exp(kk * np.arange(B))[None, :]).reshape(-1)[:span]
+            seg = seg * rot
             Yb = ffts(seg)
             applied = df
         self.tm["sf1_pool_cfo"] += _pc() - _t
